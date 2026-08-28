@@ -45,7 +45,7 @@ Tracking::Tracking(System *pSys, ORBVocabulary* pVoc, FrameDrawer *pFrameDrawer,
     mState(NO_IMAGES_YET), mSensor(sensor), mTrackedFr(0), mbStep(false),
     mbOnlyTracking(false), mbMapUpdated(false), mbVO(false), mpORBVocabulary(pVoc), mpKeyFrameDB(pKFDB),
     mbReadyToInitializate(false), mpSystem(pSys), mpViewer(NULL), bStepByStep(false),
-    mpFrameDrawer(pFrameDrawer), mpMapDrawer(pMapDrawer), mpAtlas(pAtlas), mnLastRelocFrameId(0), time_recently_lost(5.0),
+    mpFrameDrawer(pFrameDrawer), mpMapDrawer(pMapDrawer), mpAtlas(pAtlas), mnLastRelocFrameId(0), mnLastKeyFrameId(0), time_recently_lost(5.0),
     mnInitialFrameId(0), mbCreatedMap(false), mnFirstFrameId(0), mpCamera2(nullptr), mpLastKeyFrame(static_cast<KeyFrame*>(NULL))
 {
     // Load camera parameters from settings file
@@ -2036,7 +2036,7 @@ void Tracking::Track()
         else
         {
             // Localization Mode: Local Mapping is deactivated (TODO Not available in inertial mode)
-            if(mState==LOST)
+            if(mState==LOST || mState==RECENTLY_LOST)
             {
                 if(mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD)
                     Verbose::PrintMess("IMU. State LOST", Verbose::VERBOSITY_NORMAL);
@@ -2268,7 +2268,7 @@ void Tracking::Track()
         }
 
         // Reset if the camera get lost soon after initialization
-        if(mState==LOST)
+        if(mState==LOST || mState==RECENTLY_LOST)
         {
             if(pCurrentMap->KeyFramesInMap()<=10)
             {

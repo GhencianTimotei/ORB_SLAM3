@@ -577,8 +577,9 @@ void MapPoint::PreSave(set<KeyFrame*>& spKF,set<MapPoint*>& spMP)
 
     mBackupObservationsId1.clear();
     mBackupObservationsId2.clear();
+    const std::map<KeyFrame*,std::tuple<int,int> > obsCopy = mObservations;
     // Save the id and position in each KF who view it
-    for(std::map<KeyFrame*,std::tuple<int,int> >::const_iterator it = mObservations.begin(), end = mObservations.end(); it != end; ++it)
+    for(std::map<KeyFrame*,std::tuple<int,int> >::const_iterator it = obsCopy.begin(), end = obsCopy.end(); it != end; ++it)
     {
         KeyFrame* pKFi = it->first;
         if(spKF.find(pKFi) != spKF.end())
@@ -629,6 +630,7 @@ void MapPoint::PostLoad(map<long unsigned int, KeyFrame*>& mpKFid, map<long unsi
 
     mBackupObservationsId1.clear();
     mBackupObservationsId2.clear();
+    const std::map<KeyFrame*,std::tuple<int,int> > obsCopy = mObservations;
 }
 
 } //namespace ORB_SLAM
