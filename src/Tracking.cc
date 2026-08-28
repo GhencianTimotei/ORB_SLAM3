@@ -45,7 +45,7 @@ Tracking::Tracking(System *pSys, ORBVocabulary* pVoc, FrameDrawer *pFrameDrawer,
     mState(NO_IMAGES_YET), mSensor(sensor), mTrackedFr(0), mbStep(false),
     mbOnlyTracking(false), mbMapUpdated(false), mbVO(false), mpORBVocabulary(pVoc), mpKeyFrameDB(pKFDB),
     mbReadyToInitializate(false), mpSystem(pSys), mpViewer(NULL), bStepByStep(false),
-    mpFrameDrawer(pFrameDrawer), mpMapDrawer(pMapDrawer), mpAtlas(pAtlas), mnLastRelocFrameId(0), time_recently_lost(5.0),
+    mpFrameDrawer(pFrameDrawer), mpMapDrawer(pMapDrawer), mpAtlas(pAtlas), mnLastRelocFrameId(0), mnLastKeyFrameId(0), time_recently_lost(5.0),
     mnInitialFrameId(0), mbCreatedMap(false), mnFirstFrameId(0), mpCamera2(nullptr), mpLastKeyFrame(static_cast<KeyFrame*>(NULL))
 {
     // Load camera parameters from settings file
@@ -1864,6 +1864,15 @@ void Tracking::Track()
         mState = NOT_INITIALIZED;
     }
 
+    // Mono loaded-atlas localization: if the active map already has keyframes,
+    // skip (re)initialization (which would build a NEW map) and force LOST so
+    // Track() relocalizes into the loaded map instead. (UZ#415/#76)
+    if(mbOnlyTracking && mState==NOT_INITIALIZED &&
+       mpAtlas->GetCurrentMap() && mpAtlas->KeyFramesInMap() > 0)
+    {
+        mState = LOST;
+    }
+
     mLastProcessedState=mState;
 
     if ((mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD) && !mbCreatedMap)
@@ -2036,7 +2045,7 @@ void Tracking::Track()
         else
         {
             // Localization Mode: Local Mapping is deactivated (TODO Not available in inertial mode)
-            if(mState==LOST)
+            if(mState==LOST || mState==RECENTLY_LOST)
             {
                 if(mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD)
                     Verbose::PrintMess("IMU. State LOST", Verbose::VERBOSITY_NORMAL);
@@ -2267,8 +2276,10 @@ void Tracking::Track()
             }
         }
 
-        // Reset if the camera get lost soon after initialization
-        if(mState==LOST)
+        // Reset if the camera get lost soon after initialization.
+        // Localization mode (mbOnlyTracking): NEVER abandon the loaded map for a
+        // new one -- stay LOST and keep relocalizing into it every frame. (UZ#415)
+        if(mState==LOST && !mbOnlyTracking)
         {
             if(pCurrentMap->KeyFramesInMap()<=10)
             {

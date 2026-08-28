@@ -496,12 +496,16 @@ protected:
     Eigen::Matrix3f mK_;
 
     // Mutex
+    bool mbFixedInBA = false;  // protect loaded backbone KFs from local BA
     std::mutex mMutexPose; // for pose, velocity and biases
     std::mutex mMutexConnections;
     std::mutex mMutexFeatures;
     std::mutex mMutexMap;
 
 public:
+    void SetFixedInBA(bool f) { std::unique_lock<std::mutex> l(mMutexPose); mbFixedInBA = f; }
+    bool IsFixedInBA() { std::unique_lock<std::mutex> l(mMutexPose); return mbFixedInBA; }
+
     GeometricCamera* mpCamera, *mpCamera2;
 
     //Indexes of stereo observations correspondences

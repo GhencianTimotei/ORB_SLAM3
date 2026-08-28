@@ -36,7 +36,7 @@
 namespace ORB_SLAM3
 {
 
-Verbose::eLevel Verbose::th = Verbose::VERBOSITY_NORMAL;
+Verbose::eLevel Verbose::th = Verbose::VERBOSITY_DEBUG;
 
 System::System(const string &strVocFile, const string &strSettingsFile, const eSensor sensor,
                const bool bUseViewer, const int initFr, const string &strSequence):
@@ -152,7 +152,7 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
         cout << "Load File" << endl;
 
         // Load the file with an earlier session
-        //clock_t start = clock();
+        clock_t start = clock();
         cout << "Initialization of Atlas from file: " << mStrLoadAtlasFromFile << endl;
         bool isRead = LoadAtlas(FileType::BINARY_FILE);
 
@@ -168,11 +168,21 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
 
         loadedAtlas = true;
 
-        mpAtlas->CreateNewMap();
+        // Localization on a loaded atlas: activate the loaded map instead of
+        // creating a new empty one. Relocalization searches only the ACTIVE
+        // map, so a fresh empty active map => never relocalizes. (UZ#415/#515)
+        {
+            Map* pBest = nullptr;
+            for (Map* pM : mpAtlas->GetAllMaps())
+                if (pM && (!pBest || pM->KeyFramesInMap() > pBest->KeyFramesInMap()))
+                    pBest = pM;
+            if (pBest) mpAtlas->ChangeMap(pBest);
+            else mpAtlas->CreateNewMap();
+        }
 
-        //clock_t timeElapsed = clock() - start;
-        //unsigned msElapsed = timeElapsed / (CLOCKS_PER_SEC / 1000);
-        //cout << "Binary file read in " << msElapsed << " ms" << endl;
+        clock_t timeElapsed = clock() - start;
+        unsigned msElapsed = timeElapsed / (CLOCKS_PER_SEC / 1000);
+        cout << "Binary file read in " << msElapsed << " ms" << endl;
 
         //usleep(10*1000*1000);
     }
@@ -523,36 +533,35 @@ void System::Shutdown()
 
     mpLocalMapper->RequestFinish();
     mpLoopCloser->RequestFinish();
-    /*if(mpViewer)
+    if(mpViewer)
     {
         mpViewer->RequestFinish();
         while(!mpViewer->isFinished())
             usleep(5000);
-    }*/
+    }
 
     // Wait until all thread have effectively stopped
-    /*while(!mpLocalMapper->isFinished() || !mpLoopCloser->isFinished() || mpLoopCloser->isRunningGBA())
+    while(!mpLocalMapper->isFinished() || !mpLoopCloser->isFinished() || mpLoopCloser->isRunningGBA())
     {
         if(!mpLocalMapper->isFinished())
-            cout << "mpLocalMapper is not finished" << endl;*/
-        /*if(!mpLoopCloser->isFinished())
+            cout << "mpLocalMapper is not finished" << endl;
+        if(!mpLoopCloser->isFinished())
             cout << "mpLoopCloser is not finished" << endl;
         if(mpLoopCloser->isRunningGBA()){
             cout << "mpLoopCloser is running GBA" << endl;
             cout << "break anyway..." << endl;
-            break;
-        }*/
-        /*usleep(5000);
-    }*/
-
-    if(!mStrSaveAtlasToFile.empty())
-    {
-        Verbose::PrintMess("Atlas saving to file " + mStrSaveAtlasToFile, Verbose::VERBOSITY_NORMAL);
-        SaveAtlas(FileType::BINARY_FILE);
+            // break;
+        }
+        usleep(5000);
     }
 
-    /*if(mpViewer)
-        pangolin::BindToContext("ORB-SLAM2: Map Viewer");*/
+    cout << "After While" << endl;
+    Verbose::PrintMess("Atlas saving to file " + mStrSaveAtlasToFile, Verbose::VERBOSITY_NORMAL);
+    SaveAtlas(FileType::BINARY_FILE);
+    
+    cout << "After mStrSaveAtlasToFile" << endl;
+    if(mpViewer)
+        pangolin::BindToContext("ORB-SLAM2: Map Viewer");
 
 #ifdef REGISTER_TIMES
     mpTracker->PrintTimeStats();
@@ -1330,6 +1339,25 @@ vector<MapPoint*> System::GetTrackedMapPoints()
     return mTrackedMapPoints;
 }
 
+vector<MapPoint*> System::GetAllMapPoints()
+{
+    Map* pActiveMap = mpAtlas->GetCurrentMap();
+    if (!pActiveMap) return std::vector<MapPoint*>();
+    return pActiveMap->GetAllMapPoints();
+}
+
+int System::GetInlierMatches()
+{
+    unique_lock<mutex> lock(mMutexState);
+    return mpTracker ? mpTracker->GetMatchesInliers() : 0;
+}
+
+int System::GetTrackedKFCount()
+{
+    Map* pMap = mpAtlas->GetCurrentMap();
+    return pMap ? static_cast<int>(pMap->KeyFramesInMap()) : 0;
+}
+
 vector<cv::KeyPoint> System::GetTrackedKeyPointsUn()
 {
     unique_lock<mutex> lock(mMutexState);
@@ -1406,7 +1434,9 @@ void System::SaveAtlas(int type){
         //clock_t start = clock();
 
         // Save the current session
+        cout << "PreSave" << endl;
         mpAtlas->PreSave();
+        cout << "PostSave" << endl;
 
         string pathSaveFileName = "./";
         pathSaveFileName = pathSaveFileName.append(mStrSaveAtlasToFile);
@@ -1499,6 +1529,9 @@ bool System::LoadAtlas(int type)
         mpAtlas->SetKeyFrameDababase(mpKeyFrameDatabase);
         mpAtlas->SetORBVocabulary(mpVocabulary);
         mpAtlas->PostLoad();
+        for (Map* pM : mpAtlas->GetAllMaps())
+            for (KeyFrame* pKF : pM->GetAllKeyFrames())
+                if (pKF) pKF->SetFixedInBA(true);   // protect loaded backbone in local BA
 
         return true;
     }

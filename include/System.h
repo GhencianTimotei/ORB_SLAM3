@@ -175,6 +175,9 @@ public:
     // You can call this right after TrackMonocular (or stereo or RGBD)
     int GetTrackingState();
     std::vector<MapPoint*> GetTrackedMapPoints();
+    std::vector<MapPoint*> GetAllMapPoints();  // all points of the active (loaded) map
+    int GetInlierMatches();   // inlier map-point matches in the last tracked frame
+    int GetTrackedKFCount();  // keyframes in the active map
     std::vector<cv::KeyPoint> GetTrackedKeyPointsUn();
 
     // For debugging

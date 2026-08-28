@@ -117,6 +117,8 @@ public:
 
 public:
 
+    int GetMatchesInliers() const { return mnMatchesInliers; }
+
     // Tracking states
     enum eTrackingState{
         SYSTEM_NOT_READY=-1,

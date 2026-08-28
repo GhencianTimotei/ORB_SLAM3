@@ -317,6 +317,7 @@ void Atlas::PreSave()
     sort(mvpBackupMaps.begin(), mvpBackupMaps.end(), compFunctor());
 
     std::set<GeometricCamera*> spCams(mvpCameras.begin(), mvpCameras.end());
+    cout << "PostspCameras" << endl;
     for(Map* pMi : mvpBackupMaps)
     {
         if(!pMi || pMi->IsBad())
@@ -327,9 +328,12 @@ void Atlas::PreSave()
             SetMapBad(pMi);
             continue;
         }
+        std::cout << "[PRESAVE] map id=" << pMi->GetId() << " bad=" << pMi->IsBad() << " KFs=" << pMi->GetAllKeyFrames().size() << " MPs=" << pMi->GetAllMapPoints().size() << " backupMaps=" << mvpBackupMaps.size() << std::endl;
         pMi->PreSave(spCams);
     }
+    cout << "Postfor" << endl;
     RemoveBadMaps();
+    cout << "Postbadmaps" << endl;
 }
 
 void Atlas::PostLoad()
