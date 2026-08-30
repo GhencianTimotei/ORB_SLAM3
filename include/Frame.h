@@ -261,7 +261,9 @@ public:
 
     // Imu preintegration from last keyframe
     IMU::Preintegrated* mpImuPreintegrated;
-    KeyFrame* mpLastKeyFrame;
+    // Must never be left indeterminate: PreintegrateIMU() has early returns that skip
+    // assigning it, and Tracking::UpdateLocalKeyFrames() only guards against null.
+    KeyFrame* mpLastKeyFrame = nullptr;
 
     // Pointer to previous frame
     Frame* mpPrevFrame;

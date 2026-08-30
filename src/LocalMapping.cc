@@ -133,6 +133,10 @@ void LocalMapping::Run()
 
                         if(dist>0.05)
                             mTinit += mpCurrentKeyFrame->mTimeStamp - mpCurrentKeyFrame->mPrevKF->mTimeStamp;
+                        cout << "DIAG motion: dist=" << dist << " mTinit=" << mTinit
+                             << " BA1=" << mpCurrentKeyFrame->GetMap()->GetIniertialBA1()
+                             << " BA2=" << mpCurrentKeyFrame->GetMap()->GetIniertialBA2()
+                             << " nKF=" << mpAtlas->KeyFramesInMap() << endl;
                         if(!mpCurrentKeyFrame->GetMap()->GetIniertialBA2())
                         {
                             if((mTinit<10.f) && (dist<0.02))
@@ -1268,6 +1272,10 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
 
     std::chrono::steady_clock::time_point t1 = std::chrono::steady_clock::now();
 
+    cout << "DIAG InitializeIMU: scale=" << mScale
+         << " priorG=" << priorG << " priorA=" << priorA
+         << " bg=" << mbg.transpose() << " ba=" << mba.transpose()
+         << " nKF=" << mpAtlas->GetCurrentMap()->KeyFramesInMap() << endl;
     if (mScale<1e-1)
     {
         cout << "scale too small" << endl;

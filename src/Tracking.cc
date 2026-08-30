@@ -3184,6 +3184,9 @@ bool Tracking::NeedNewKeyFrame()
     else
         c4=false;
 
+    cout << "DIAG needkf: inliers=" << mnMatchesInliers << " nRef=" << nRefMatches
+         << " c1a=" << c1a << " c1b=" << c1b << " c2=" << c2
+         << " c3=" << c3 << " c4=" << c4 << endl;
     if(((c1a||c1b||c1c) && c2)||c3 ||c4)
     {
         // If the mapping accepts keyframes, insert keyframe.
