@@ -1330,6 +1330,21 @@ vector<MapPoint*> System::GetTrackedMapPoints()
     return mTrackedMapPoints;
 }
 
+bool System::IsCurrentMapImuInitialized()
+{
+    // Safe, mutex-protected (Atlas::isImuInitialized -> Map::isImuInitialized,
+    // both lock their own mutex). Deliberately does NOT go through
+    // GetTimeFromIMUInit(), which additionally reads
+    // LocalMapping::mpCurrentKeyFrame with no lock at all -- fine for a fresh
+    // map bootstrapping (rarely reached while not-yet-initialized, per the
+    // isImuInitialized() short-circuit added earlier), but a loaded, already-
+    // initialized atlas hits that unsynchronized read on every single tracked
+    // frame right through relocalization, when Tracking/LocalMapping are
+    // reassigning mpCurrentKeyFrame concurrently -- observed as a SIGSEGV
+    // inside LocalMapping::GetCurrKFTime() immediately after "Relocalized!!".
+    return mpAtlas->isImuInitialized();
+}
+
 vector<cv::KeyPoint> System::GetTrackedKeyPointsUn()
 {
     unique_lock<mutex> lock(mMutexState);
@@ -1338,9 +1353,20 @@ vector<cv::KeyPoint> System::GetTrackedKeyPointsUn()
 
 double System::GetTimeFromIMUInit()
 {
+    // Check the mutex-protected Atlas/Map flag FIRST. GetCurrKFTime() reads
+    // LocalMapping::mpCurrentKeyFrame with no lock at all, and that pointer is
+    // reassigned/torn down by the LocalMapping thread on every active-map
+    // reset. Calling it every frame from the tracking/image-callback thread
+    // (as orbslam_imu_node.cpp does, to gate pose publication on inertial
+    // init) crashed with SIGSEGV inside GetCurrKFTime during the reset churn
+    // that happens before the first successful init. Short-circuiting here
+    // means GetCurrKFTime is only reached once the current map is already
+    // IMU-initialized, which is a stable state, not a reset-heavy one.
+    if (!mpAtlas->isImuInitialized())
+        return 0.f;
     double aux = mpLocalMapper->GetCurrKFTime()-mpLocalMapper->mFirstTs;
-    if ((aux>0.) && mpAtlas->isImuInitialized())
-        return mpLocalMapper->GetCurrKFTime()-mpLocalMapper->mFirstTs;
+    if (aux>0.)
+        return aux;
     else
         return 0.f;
 }

@@ -133,10 +133,6 @@ void LocalMapping::Run()
 
                         if(dist>0.05)
                             mTinit += mpCurrentKeyFrame->mTimeStamp - mpCurrentKeyFrame->mPrevKF->mTimeStamp;
-                        cout << "DIAG motion: dist=" << dist << " mTinit=" << mTinit
-                             << " BA1=" << mpCurrentKeyFrame->GetMap()->GetIniertialBA1()
-                             << " BA2=" << mpCurrentKeyFrame->GetMap()->GetIniertialBA2()
-                             << " nKF=" << mpAtlas->KeyFramesInMap() << endl;
                         if(!mpCurrentKeyFrame->GetMap()->GetIniertialBA2())
                         {
                             if((mTinit<10.f) && (dist<0.02))
