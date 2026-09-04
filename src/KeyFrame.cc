@@ -495,7 +495,13 @@ void KeyFrame::ChangeParent(KeyFrame *pKF)
     }
 
     mpParent = pKF;
-    pKF->AddChild(this);
+    // SetBadFlag()'s reparenting fallback calls ChangeParent(mpParent) on
+    // orphaned children, and mpParent can legitimately be nullptr (a keyframe
+    // created with no covisible neighbours never gets a parent assigned in
+    // UpdateConnections()). Confirmed via gdb: AddChild(this=0x0) crashed
+    // inside pthread_mutex_lock -- a plain null-pointer deref, not a race.
+    if(pKF)
+        pKF->AddChild(this);
 }
 
 set<KeyFrame*> KeyFrame::GetChilds()
