@@ -168,7 +168,17 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
 
         loadedAtlas = true;
 
-        mpAtlas->CreateNewMap();
+        // Localization on a loaded atlas: activate the loaded map instead of
+        // creating a new empty one. Relocalization searches only the ACTIVE
+        // map, so a fresh empty active map => never relocalizes.
+        {
+            Map* pBest = nullptr;
+            for (Map* pM : mpAtlas->GetAllMaps())
+                if (pM && (!pBest || pM->KeyFramesInMap() > pBest->KeyFramesInMap()))
+                    pBest = pM;
+            if (pBest) mpAtlas->ChangeMap(pBest);
+            else mpAtlas->CreateNewMap();
+        }
 
         //clock_t timeElapsed = clock() - start;
         //unsigned msElapsed = timeElapsed / (CLOCKS_PER_SEC / 1000);
@@ -523,27 +533,30 @@ void System::Shutdown()
 
     mpLocalMapper->RequestFinish();
     mpLoopCloser->RequestFinish();
-    /*if(mpViewer)
+    if(mpViewer)
     {
         mpViewer->RequestFinish();
         while(!mpViewer->isFinished())
             usleep(5000);
-    }*/
+    }
 
-    // Wait until all thread have effectively stopped
-    /*while(!mpLocalMapper->isFinished() || !mpLoopCloser->isFinished() || mpLoopCloser->isRunningGBA())
+    // Wait until all threads have effectively stopped. SaveAtlas() below reads
+    // the map while these threads can still be mutating it (KeyFrame culling,
+    // inertial BA) -- an independent race on top of the PreSave iteration bug
+    // fixed in Map.cc, and a plausible second cause of atlas-save crashes.
+    while(!mpLocalMapper->isFinished() || !mpLoopCloser->isFinished() || mpLoopCloser->isRunningGBA())
     {
         if(!mpLocalMapper->isFinished())
-            cout << "mpLocalMapper is not finished" << endl;*/
-        /*if(!mpLoopCloser->isFinished())
+            cout << "mpLocalMapper is not finished" << endl;
+        if(!mpLoopCloser->isFinished())
             cout << "mpLoopCloser is not finished" << endl;
         if(mpLoopCloser->isRunningGBA()){
             cout << "mpLoopCloser is running GBA" << endl;
             cout << "break anyway..." << endl;
             break;
-        }*/
-        /*usleep(5000);
-    }*/
+        }
+        usleep(5000);
+    }
 
     if(!mStrSaveAtlasToFile.empty())
     {
@@ -551,8 +564,8 @@ void System::Shutdown()
         SaveAtlas(FileType::BINARY_FILE);
     }
 
-    /*if(mpViewer)
-        pangolin::BindToContext("ORB-SLAM2: Map Viewer");*/
+    if(mpViewer)
+        pangolin::BindToContext("ORB-SLAM2: Map Viewer");
 
 #ifdef REGISTER_TIMES
     mpTracker->PrintTimeStats();
@@ -1330,6 +1343,25 @@ vector<MapPoint*> System::GetTrackedMapPoints()
     return mTrackedMapPoints;
 }
 
+vector<MapPoint*> System::GetAllMapPoints()
+{
+    Map* pActiveMap = mpAtlas->GetCurrentMap();
+    if (!pActiveMap) return std::vector<MapPoint*>();
+    return pActiveMap->GetAllMapPoints();
+}
+
+int System::GetInlierMatches()
+{
+    unique_lock<mutex> lock(mMutexState);
+    return mpTracker ? mpTracker->GetMatchesInliers() : 0;
+}
+
+int System::GetTrackedKFCount()
+{
+    Map* pMap = mpAtlas->GetCurrentMap();
+    return pMap ? static_cast<int>(pMap->KeyFramesInMap()) : 0;
+}
+
 bool System::IsCurrentMapImuInitialized()
 {
     // Safe, mutex-protected (Atlas::isImuInitialized -> Map::isImuInitialized,
@@ -1525,6 +1557,9 @@ bool System::LoadAtlas(int type)
         mpAtlas->SetKeyFrameDababase(mpKeyFrameDatabase);
         mpAtlas->SetORBVocabulary(mpVocabulary);
         mpAtlas->PostLoad();
+        for (Map* pM : mpAtlas->GetAllMaps())
+            for (KeyFrame* pKF : pM->GetAllKeyFrames())
+                if (pKF) pKF->SetFixedInBA(true);   // protect loaded backbone in local BA
 
         return true;
     }

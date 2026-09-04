@@ -358,8 +358,14 @@ void Map::SetLastMapChange(int currentChangeId)
 
 void Map::PreSave(std::set<GeometricCamera*> &spCams)
 {
+    // Iterate COPIES: EraseObservation / MapPoint::PreSave / KF cull below can
+    // SetBadFlag -> Erase{MapPoint,KeyFrame} -> mutate mspMapPoints/mspKeyFrames
+    // mid-loop -> _Rb_tree_increment SIGSEGV when saving a merged multi-map atlas.
+    const std::set<MapPoint*> spMapPointsBackup = mspMapPoints;
+    const std::set<KeyFrame*> spKeyFramesBackup = mspKeyFrames;
+
     int nMPWithoutObs = 0;
-    for(MapPoint* pMPi : mspMapPoints)
+    for(MapPoint* pMPi : spMapPointsBackup)
     {
         if(!pMPi || pMPi->isBad())
             continue;
@@ -390,7 +396,7 @@ void Map::PreSave(std::set<GeometricCamera*> &spCams)
 
     // Backup of MapPoints
     mvpBackupMapPoints.clear();
-    for(MapPoint* pMPi : mspMapPoints)
+    for(MapPoint* pMPi : spMapPointsBackup)
     {
         if(!pMPi || pMPi->isBad())
             continue;
@@ -401,7 +407,7 @@ void Map::PreSave(std::set<GeometricCamera*> &spCams)
 
     // Backup of KeyFrames
     mvpBackupKeyFrames.clear();
-    for(KeyFrame* pKFi : mspKeyFrames)
+    for(KeyFrame* pKFi : spKeyFramesBackup)
     {
         if(!pKFi || pKFi->isBad())
             continue;

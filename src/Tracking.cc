@@ -1864,6 +1864,15 @@ void Tracking::Track()
         mState = NOT_INITIALIZED;
     }
 
+    // Mono loaded-atlas localization: if the active map already has keyframes,
+    // skip (re)initialization (which would build a NEW map) and force LOST so
+    // Track() relocalizes into the loaded map instead.
+    if(mbOnlyTracking && mState==NOT_INITIALIZED &&
+       mpAtlas->GetCurrentMap() && mpAtlas->KeyFramesInMap() > 0)
+    {
+        mState = LOST;
+    }
+
     mLastProcessedState=mState;
 
     if ((mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD) && !mbCreatedMap)
@@ -2267,8 +2276,10 @@ void Tracking::Track()
             }
         }
 
-        // Reset if the camera get lost soon after initialization
-        if(mState==LOST || mState==RECENTLY_LOST)
+        // Reset if the camera get lost soon after initialization.
+        // Localization mode (mbOnlyTracking): NEVER abandon the loaded map for a
+        // new one -- stay LOST and keep relocalizing into it every frame.
+        if(mState==LOST && !mbOnlyTracking)
         {
             if(pCurrentMap->KeyFramesInMap()<=10)
             {
@@ -3184,9 +3195,6 @@ bool Tracking::NeedNewKeyFrame()
     else
         c4=false;
 
-    cout << "DIAG needkf: inliers=" << mnMatchesInliers << " nRef=" << nRefMatches
-         << " c1a=" << c1a << " c1b=" << c1b << " c2=" << c2
-         << " c3=" << c3 << " c4=" << c4 << endl;
     if(((c1a||c1b||c1c) && c2)||c3 ||c4)
     {
         // If the mapping accepts keyframes, insert keyframe.
@@ -3667,6 +3675,7 @@ bool Tracking::Relocalization()
     // Alternatively perform some iterations of P4P RANSAC
     // Until we found a camera pose supported by enough inliers
     bool bMatch = false;
+    KeyFrame* pMatchedKF = nullptr;
     ORBmatcher matcher2(0.9,true);
 
     while(nCandidates>0 && !bMatch)
@@ -3760,6 +3769,7 @@ bool Tracking::Relocalization()
                 if(nGood>=50)
                 {
                     bMatch = true;
+                    pMatchedKF = vpCandidateKFs[i];
                     break;
                 }
             }
@@ -3772,6 +3782,28 @@ bool Tracking::Relocalization()
     }
     else
     {
+        // Relocalization()'s PnP solve only sets mCurrentFrame's pose --
+        // it never touches IMU velocity/bias. Left alone, a frame that just
+        // relocalized into a mature, bias/velocity-converged loaded map (or
+        // any map with IMU already initialized) carries an unset velocity
+        // (Eigen::Vector3f has no default zero-init -- garbage until
+        // SetVelocity() is called) and a zero mImuBias completely
+        // inconsistent with the map. The next inertial pose optimization
+        // (PoseInertialOptimizationLastFrame) reads those fields straight
+        // into its g2o vertices (VertexVelocity/VertexGyroBias/VertexAccBias),
+        // producing a NaN preintegrated rotation and aborting in
+        // Sophus::SO3::exp. Seed from the matched KeyFrame here, the same
+        // fields PredictStateIMU() seeds from mpLastKeyFrame for the
+        // RECENTLY_LOST path -- do not touch the pose itself, PnP already
+        // solved that.
+        if((mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD) &&
+           pMatchedKF && pMatchedKF->GetMap()->isImuInitialized())
+        {
+            mCurrentFrame.SetVelocity(pMatchedKF->GetVelocity());
+            mCurrentFrame.mImuBias = pMatchedKF->GetImuBias();
+            mCurrentFrame.mPredBias = mCurrentFrame.mImuBias;
+        }
+
         mnLastRelocFrameId = mCurrentFrame.mnId;
         cout << "Relocalized!!" << endl;
         return true;

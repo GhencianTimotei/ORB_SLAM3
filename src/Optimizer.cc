@@ -1217,7 +1217,7 @@ void Optimizer::LocalBundleAdjustment(KeyFrame *pKF, bool* pbStopFlag, Map* pMap
         Sophus::SE3<float> Tcw = pKFi->GetPose();
         vSE3->setEstimate(g2o::SE3Quat(Tcw.unit_quaternion().cast<double>(), Tcw.translation().cast<double>()));
         vSE3->setId(pKFi->mnId);
-        vSE3->setFixed(pKFi->mnId==pMap->GetInitKFid());
+        vSE3->setFixed(pKFi->mnId==pMap->GetInitKFid() || pKFi->IsFixedInBA());
         optimizer.addVertex(vSE3);
         if(pKFi->mnId>maxKFid)
             maxKFid=pKFi->mnId;
