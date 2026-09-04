@@ -1787,7 +1787,87 @@ bool Tracking::PredictStateIMU()
 
 void Tracking::ResetFrameIMU()
 {
-    // TODO To implement...
+    // Reset IMU biases and recompute frame velocity/pose at the exit of the
+    // post-relocalization vision-only window (see Track(), ~mnLastRelocFrameId
+    // + mnFramesToResetIMU). Reuses the propagation idiom from UpdateFrameIMU()
+    // but skips its spin-wait and mlRelativeFramePoses walk, which don't apply
+    // (and aren't safe) at this call site inside Track().
+    if(!mpLastKeyFrame)
+    {
+        Verbose::PrintMess("ResetFrameIMU: no last keyframe, skipping IMU reset", Verbose::VERBOSITY_NORMAL);
+        return;
+    }
+
+    // Bias from the last keyframe: created after relocalization, so its bias
+    // came from local BA on the relocalized map. mLastBias is unsafe here --
+    // it is only refreshed once mnId > mnLastRelocFrameId+30 below, a hardcoded
+    // threshold that only matches mnFramesToResetIMU (== fps) at 30 fps.
+    IMU::Bias b;
+    if(mpLastKeyFrame->mnFrameId >= mnLastRelocFrameId)
+    {
+        b = mpLastKeyFrame->GetImuBias();
+    }
+    else
+    {
+        Verbose::PrintMess("ResetFrameIMU: last keyframe predates relocalization, falling back to current frame bias", Verbose::VERBOSITY_NORMAL);
+        b = mCurrentFrame.mImuBias;
+    }
+
+    mLastBias = b;
+    mLastFrame.SetNewBias(b);
+    mCurrentFrame.SetNewBias(b);
+
+    const Eigen::Vector3f Gz(0, 0, -IMU::GRAVITY_VALUE);
+
+    if(mLastFrame.mpLastKeyFrame && mLastFrame.mpImuPreintegrated)
+    {
+        if(mLastFrame.mnId == mLastFrame.mpLastKeyFrame->mnFrameId)
+        {
+            mLastFrame.SetImuPoseVelocity(mLastFrame.mpLastKeyFrame->GetImuRotation(),
+                                          mLastFrame.mpLastKeyFrame->GetImuPosition(),
+                                          mLastFrame.mpLastKeyFrame->GetVelocity());
+        }
+        else
+        {
+            const Eigen::Vector3f twb1 = mLastFrame.mpLastKeyFrame->GetImuPosition();
+            const Eigen::Matrix3f Rwb1 = mLastFrame.mpLastKeyFrame->GetImuRotation();
+            const Eigen::Vector3f Vwb1 = mLastFrame.mpLastKeyFrame->GetVelocity();
+            const float t12 = mLastFrame.mpImuPreintegrated->dT;
+
+            mLastFrame.SetImuPoseVelocity(IMU::NormalizeRotation(Rwb1*mLastFrame.mpImuPreintegrated->GetUpdatedDeltaRotation()),
+                                          twb1 + Vwb1*t12 + 0.5f*t12*t12*Gz+ Rwb1*mLastFrame.mpImuPreintegrated->GetUpdatedDeltaPosition(),
+                                          Vwb1 + Gz*t12 + Rwb1*mLastFrame.mpImuPreintegrated->GetUpdatedDeltaVelocity());
+        }
+    }
+    else
+    {
+        Verbose::PrintMess("ResetFrameIMU: mLastFrame missing keyframe/preintegration, skipping its pose/velocity recompute", Verbose::VERBOSITY_NORMAL);
+    }
+
+    if(mCurrentFrame.mpLastKeyFrame && mCurrentFrame.mpImuPreintegrated)
+    {
+        const Eigen::Vector3f twb1 = mCurrentFrame.mpLastKeyFrame->GetImuPosition();
+        const Eigen::Matrix3f Rwb1 = mCurrentFrame.mpLastKeyFrame->GetImuRotation();
+        const Eigen::Vector3f Vwb1 = mCurrentFrame.mpLastKeyFrame->GetVelocity();
+        const float t12 = mCurrentFrame.mpImuPreintegrated->dT;
+
+        mCurrentFrame.SetImuPoseVelocity(IMU::NormalizeRotation(Rwb1*mCurrentFrame.mpImuPreintegrated->GetUpdatedDeltaRotation()),
+                                      twb1 + Vwb1*t12 + 0.5f*t12*t12*Gz+ Rwb1*mCurrentFrame.mpImuPreintegrated->GetUpdatedDeltaPosition(),
+                                      Vwb1 + Gz*t12 + Rwb1*mCurrentFrame.mpImuPreintegrated->GetUpdatedDeltaVelocity());
+    }
+    else
+    {
+        Verbose::PrintMess("ResetFrameIMU: mCurrentFrame missing keyframe/preintegration, skipping its pose/velocity recompute", Verbose::VERBOSITY_NORMAL);
+    }
+
+    // Rebuild the keyframe-level preintegration so it no longer spans the
+    // relocalization outage -- this is what kills "ERROR building inertial edge".
+    if(mpImuPreintegratedFromLastKF)
+        delete mpImuPreintegratedFromLastKF;
+    mpImuPreintegratedFromLastKF = new IMU::Preintegrated(b, *mpImuCalib);
+    mCurrentFrame.mpImuPreintegrated = mpImuPreintegratedFromLastKF;
+
+    mnFirstImuFrameId = mCurrentFrame.mnId;
 }
 
 
@@ -2172,18 +2252,11 @@ void Tracking::Track()
             //}
         }
 
-        // Save frame if recent relocalization, since they are used for IMU reset (as we are making copy, it shluld be once mCurrFrame is completely modified)
-        if((mCurrentFrame.mnId<(mnLastRelocFrameId+mnFramesToResetIMU)) && (mCurrentFrame.mnId > mnFramesToResetIMU) &&
-           (mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD) && pCurrentMap->isImuInitialized())
-        {
-            // TODO check this situation
-            Verbose::PrintMess("Saving pointer to frame. imu needs reset...", Verbose::VERBOSITY_NORMAL);
-            Frame* pF = new Frame(mCurrentFrame);
-            pF->mpPrevFrame = new Frame(mLastFrame);
-
-            // Load preintegration
-            pF->mpImuPreintegratedFrame = new IMU::Preintegrated(mCurrentFrame.mpImuPreintegratedFrame);
-        }
+        // Removed: this block used to heap-allocate a Frame + prev-Frame + Preintegrated
+        // per frame across the whole post-reloc window and store the pointer nowhere
+        // (leak, ~3 objects x fps per relocalization). Its only intended consumer was
+        // ResetFrameIMU(), which now re-seeds bias/velocity/preintegration directly from
+        // mpLastKeyFrame instead of replaying a saved window.
 
         if(pCurrentMap->isImuInitialized())
         {
