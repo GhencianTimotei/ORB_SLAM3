@@ -213,6 +213,17 @@ void Map::SetStoredMap()
 
 void Map::clear()
 {
+    // Concurrency: clear() runs on the Tracking thread (via
+    // Tracking::ResetActiveMap() -> Atlas::clearMap()) while LocalMapping can
+    // still be mutating mspKeyFrames/mspMapPoints on its own thread (e.g.
+    // KeyFrameCulling -> KeyFrame::SetBadFlag -> Map::EraseKeyFrame). Every
+    // other Map mutator (AddKeyFrame/EraseKeyFrame/AddMapPoint/EraseMapPoint)
+    // takes mMutexMap; this one didn't, so the two threads could mutate the
+    // same std::set concurrently and corrupt the heap -- surfacing later as a
+    // SIGSEGV in an unrelated KeyFrame's mutex (LocalMapping::KeyFrameCulling
+    // -> KeyFrame::SetBadFlag -> ChangeParent -> AddChild).
+    unique_lock<mutex> lock(mMutexMap);
+
 //    for(set<MapPoint*>::iterator sit=mspMapPoints.begin(), send=mspMapPoints.end(); sit!=send; sit++)
 //        delete *sit;
 
