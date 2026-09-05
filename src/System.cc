@@ -20,6 +20,7 @@
 
 #include "System.h"
 #include "Converter.h"
+#include "TuningParams.h"
 #include <thread>
 #include <pangolin/pangolin.h>
 #include <iomanip>
@@ -73,6 +74,13 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
        cerr << "Failed to open settings file at: " << strSettingsFile << endl;
        exit(-1);
     }
+
+    // Knobs for constants upstream hardcodes (keyframe rate, local BA window,
+    // inertial init gates). Must be loaded before Tracking and LocalMapping are
+    // constructed below, since both read them at construction. Every one of them
+    // defaults to the upstream constant, so a settings file that mentions none
+    // of them behaves exactly as stock ORB-SLAM3. See include/TuningParams.h.
+    Tuning::LoadFromSettings(strSettingsFile);
 
     cv::FileNode node = fsSettings["File.version"];
     if(!node.empty() && node.isString() && node.string() == "1.0"){
@@ -484,6 +492,22 @@ Sophus::SE3f System::TrackMonocular(const cv::Mat &im, const double &timestamp, 
 }
 
 
+
+void System::SetGravityPrior(const Eigen::Vector3f &dirGravityInBody)
+{
+    if(!Tuning::useGravityPrior)
+    {
+        cout << "SetGravityPrior: ignored, IMU.useGravityPrior is not set in the "
+                "settings file" << endl;
+        return;
+    }
+    GravityPrior::Set(dirGravityInBody);
+}
+
+void System::ClearGravityPrior()
+{
+    GravityPrior::Clear();
+}
 
 void System::ActivateLocalizationMode()
 {

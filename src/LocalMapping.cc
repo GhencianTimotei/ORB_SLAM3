@@ -23,9 +23,13 @@
 #include "Optimizer.h"
 #include "Converter.h"
 #include "GeometricTools.h"
+#include "TuningParams.h"
 
 #include<mutex>
 #include<chrono>
+#include<algorithm>
+#include<iomanip>
+#include<iostream>
 
 namespace ORB_SLAM3
 {
@@ -73,6 +77,22 @@ void LocalMapping::Run()
         // Check if there are keyframes in the queue
         if(CheckNewKeyFrames() && !mbBadImu)
         {
+            // Always-on stage timing, reported every LocalMapping.timingLogKFs
+            // keyframes. A steady_clock read is ~20 ns, so five per keyframe is
+            // free next to a bundle adjustment, and it lets the LocalMapping
+            // thread's share of process CPU be attributed to a specific stage
+            // without rebuilding the whole library with -DREGISTER_TIMES.
+            // A skipped stage reports 0 and its time rolls into the next one.
+            std::chrono::steady_clock::time_point tStageLast = std::chrono::steady_clock::now();
+            double msKFInsert = 0.0, msMPCreate = 0.0, msSearch = 0.0;
+            double msLBA = 0.0, msCulling = 0.0;
+            auto stageLap = [&tStageLast]() {
+                const std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
+                const double ms = std::chrono::duration<double, std::milli>(now - tStageLast).count();
+                tStageLast = now;
+                return ms;
+            };
+
 #ifdef REGISTER_TIMES
             double timeLBA_ms = 0;
             double timeKFCulling_ms = 0;
@@ -96,9 +116,11 @@ void LocalMapping::Run()
             double timeMPCulling = std::chrono::duration_cast<std::chrono::duration<double,std::milli> >(time_EndMPCulling - time_EndProcessKF).count();
             vdMPCulling_ms.push_back(timeMPCulling);
 #endif
+            msKFInsert = stageLap();
 
             // Triangulate new MapPoints
             CreateNewMapPoints();
+            msMPCreate = stageLap();
 
             mbAbortBA = false;
 
@@ -107,6 +129,7 @@ void LocalMapping::Run()
                 // Find more matches in neighbor keyframes and fuse point duplications
                 SearchInNeighbors();
             }
+            msSearch = stageLap();
 
 #ifdef REGISTER_TIMES
             std::chrono::steady_clock::time_point time_EndMPCreation = std::chrono::steady_clock::now();
@@ -156,6 +179,7 @@ void LocalMapping::Run()
                     }
 
                 }
+                msLBA = stageLap();
 #ifdef REGISTER_TIMES
                 std::chrono::steady_clock::time_point time_EndLBA = std::chrono::steady_clock::now();
 
@@ -189,6 +213,7 @@ void LocalMapping::Run()
 
                 // Check redundant local Keyframes
                 KeyFrameCulling();
+                msCulling = stageLap();
 
 #ifdef REGISTER_TIMES
                 std::chrono::steady_clock::time_point time_EndKFCulling = std::chrono::steady_clock::now();
@@ -246,6 +271,8 @@ void LocalMapping::Run()
             vdLBASync_ms.push_back(timeKFCulling_ms);
             vdKFCullingSync_ms.push_back(timeKFCulling_ms);
 #endif
+
+            ReportStageTimes(msKFInsert, msMPCreate, msSearch, msLBA, msCulling);
 
             mpLoopCloser->InsertKeyFrame(mpCurrentKeyFrame);
 
@@ -1170,6 +1197,66 @@ bool LocalMapping::isFinished()
     return mbFinished;
 }
 
+// Accumulates the per-keyframe stage costs and prints a mean/max breakdown every
+// Tuning::localMappingTimingKFs keyframes.
+//
+// This is the measurement that attributes the LocalMapping thread's CPU. On this
+// rig the process sits around 230%, i.e. roughly two saturated cores, and the
+// tracking thread accounts for only one of them (orbslam_imu_node.cpp already
+// logs TrackMonocular's mean/max). The second core is this thread, and "which
+// stage" decides which knob to turn: a large LBA figure points at
+// LocalMapping.baWindowKFsLarge, while a large total at a high keyframe rate
+// points at Tracking.minFramesBetweenKFs instead.
+//
+// The keyframe rate is printed alongside, since every stage cost has to be
+// multiplied by it to become CPU.
+void LocalMapping::ReportStageTimes(double msKFInsert, double msMPCreate, double msSearch,
+                                    double msLBA, double msCulling)
+{
+    if (Tuning::localMappingTimingKFs <= 0)
+        return;
+
+    const double msTotal = msKFInsert + msMPCreate + msSearch + msLBA + msCulling;
+
+    mStageKFInsert_ms += msKFInsert;
+    mStageMPCreate_ms += msMPCreate;
+    mStageSearch_ms   += msSearch;
+    mStageLBA_ms      += msLBA;
+    mStageCulling_ms  += msCulling;
+    mStageTotal_ms    += msTotal;
+    mStageTotalMax_ms  = std::max(mStageTotalMax_ms, msTotal);
+    mStageLBAMax_ms    = std::max(mStageLBAMax_ms, msLBA);
+
+    const double now = mpCurrentKeyFrame ? mpCurrentKeyFrame->mTimeStamp : 0.0;
+    if (mnStageCount == 0)
+        mStageWindowStartTs = now;
+
+    if (++mnStageCount < static_cast<unsigned int>(Tuning::localMappingTimingKFs))
+        return;
+
+    const double n = static_cast<double>(mnStageCount);
+    const double span = now - mStageWindowStartTs;
+    const double kfHz = (span > 1e-6) ? (n / span) : 0.0;
+
+    std::cout << std::fixed << std::setprecision(1)
+              << "LocalMapping over " << mnStageCount << " KFs: total mean "
+              << (mStageTotal_ms / n) << " ms max " << mStageTotalMax_ms << " ms"
+              << " | KFinsert " << (mStageKFInsert_ms / n)
+              << " newMPs " << (mStageMPCreate_ms / n)
+              << " neighbours " << (mStageSearch_ms / n)
+              << " LBA " << (mStageLBA_ms / n) << " (max " << mStageLBAMax_ms << ")"
+              << " culling " << (mStageCulling_ms / n)
+              << std::setprecision(2)
+              << " | keyframes " << kfHz << " Hz"
+              << " -> " << (0.1 * kfHz * mStageTotal_ms / n) << "% of one core"
+              << std::defaultfloat << std::endl;
+
+    mStageKFInsert_ms = mStageMPCreate_ms = mStageSearch_ms = 0.0;
+    mStageLBA_ms = mStageCulling_ms = mStageTotal_ms = 0.0;
+    mStageTotalMax_ms = mStageLBAMax_ms = 0.0;
+    mnStageCount = 0;
+}
+
 void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
 {
     if (mbResetRequested)
@@ -1187,6 +1274,17 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
         minTime = 1.0;
         nMinKF = 10;
     }
+
+    // These two gates are the whole "the drone has no idea where it is for the
+    // first few seconds" window. Overridable via IMU.InitMinKF / IMU.InitMinTime
+    // (see include/TuningParams.h). Only lower them once initialisation has been
+    // made better conditioned than upstream assumes -- e.g. with a gravity prior
+    // supplied below -- otherwise a worse gravity/scale estimate is baked into
+    // the map permanently in exchange for a shorter wait.
+    if (Tuning::imuInitMinKF > 0)
+        nMinKF = Tuning::imuInitMinKF;
+    if (Tuning::imuInitMinTime >= 0.0f)
+        minTime = Tuning::imuInitMinTime;
 
 
     if(mpAtlas->KeyFramesInMap()<nMinKF)
@@ -1242,6 +1340,52 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
         }
 
         dirG = dirG/dirG.norm();
+
+        // Upstream recovers the gravity direction from the accumulated
+        // preintegrated velocity above, which is why initialisation cannot run
+        // until seconds of motion have gone by. An accelerometer sitting still
+        // measures the same direction directly, so if the caller armed a prior
+        // while the platform was demonstrably at rest, use it instead.
+        //
+        // The prior arrives in the IMU body frame; rotate it into the map frame
+        // with the first keyframe's own IMU rotation, so the conversion uses
+        // ORB-SLAM3's state rather than a duplicated copy of the extrinsic.
+        //
+        // Take() is one-shot on purpose: a rest measurement is only truthful for
+        // the pre-takeoff map. A map re-initialised mid-flight must fall back to
+        // the estimate above rather than reuse a stale prior.
+        if (Tuning::useGravityPrior)
+        {
+            Eigen::Vector3f dirGBody;
+            if (GravityPrior::Take(dirGBody))
+            {
+                const Eigen::Vector3f dirGPrior =
+                    (vpKF.front()->GetImuRotation() * dirGBody).normalized();
+                const float disagreementDeg =
+                    std::acos(std::max(-1.0f, std::min(1.0f, dirGPrior.dot(dirG))))
+                    * 180.0f / static_cast<float>(M_PI);
+                // The velocity-integrated estimate is noisy -- that is the whole
+                // reason for the prior -- but it is never wrong by a large angle.
+                // A big disagreement means the prior does not describe the frame
+                // the first keyframe was created in (platform moved or rotated
+                // between the rest measurement and map start), so fall back to
+                // upstream behaviour rather than bake a bad gravity alignment in.
+                if (disagreementDeg > 45.0f)
+                {
+                    cout << "DIAG InitializeIMU: gravity prior REJECTED, "
+                         << disagreementDeg << " deg from the velocity-integrated "
+                         << "estimate; using the integrated estimate" << endl;
+                }
+                else
+                {
+                    cout << "DIAG InitializeIMU: gravity prior applied, "
+                         << disagreementDeg << " deg from the velocity-integrated estimate"
+                         << endl;
+                    dirG = dirGPrior;
+                }
+            }
+        }
+
         Eigen::Vector3f gI(0.0f, 0.0f, -1.0f);
         Eigen::Vector3f v = gI.cross(dirG);
         const float nv = v.norm();

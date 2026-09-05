@@ -82,6 +82,7 @@ src/GeometricTools.cc
 src/TwoViewReconstruction.cc
 src/Config.cc
 src/Settings.cc
+src/TuningParams.cc
 include/System.h
 include/Tracking.h
 include/LocalMapping.h
@@ -111,7 +112,8 @@ include/GeometricTools.h
 include/TwoViewReconstruction.h
 include/SerializationUtils.h
 include/Config.h
-include/Settings.h)
+include/Settings.h
+include/TuningParams.h)
 
 add_subdirectory(Thirdparty/g2o)
 

@@ -180,6 +180,22 @@ protected:
     std::mutex mMutexAccept;
 
     void InitializeIMU(float priorG = 1e2, float priorA = 1e6, bool bFirst = false);
+
+    // Per-keyframe stage timing, printed every Tuning::localMappingTimingKFs
+    // keyframes. See the definition in LocalMapping.cc for why this exists.
+    void ReportStageTimes(double msKFInsert, double msMPCreate, double msSearch,
+                          double msLBA, double msCulling);
+
+    double mStageKFInsert_ms = 0.0;
+    double mStageMPCreate_ms = 0.0;
+    double mStageSearch_ms = 0.0;
+    double mStageLBA_ms = 0.0;
+    double mStageCulling_ms = 0.0;
+    double mStageTotal_ms = 0.0;
+    double mStageTotalMax_ms = 0.0;
+    double mStageLBAMax_ms = 0.0;
+    double mStageWindowStartTs = 0.0;
+    unsigned int mnStageCount = 0;
     void ScaleRefinement();
 
     bool bInitializing;

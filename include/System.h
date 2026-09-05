@@ -122,6 +122,26 @@ public:
 
 
     // This stops local mapping thread (map building) and performs only camera tracking.
+    // Arm a gravity direction measured outside the SLAM system while the
+    // platform was at rest, for LocalMapping::InitializeIMU to use in place of
+    // integrating keyframe velocities. Requires IMU.useGravityPrior in the
+    // settings file; ignored otherwise.
+    //
+    // dirGravityInBody is a vector along gravity (the direction it pulls),
+    // expressed in the IMU body frame; it is normalised internally. For a PX4
+    // FRD IMU at rest this is approximately (0, 0, 1), i.e. minus the normalised
+    // accelerometer reading.
+    //
+    // THE CALLER MUST PROVE "AT REST" BEFORE CALLING. A direction measured while
+    // the platform is accelerating is worse than no prior at all, because
+    // InitializeIMU takes it as truth and bakes the resulting gravity alignment
+    // into the map. The prior is consumed by the first inertial initialisation
+    // and is not reused by a map re-initialised later.
+    void SetGravityPrior(const Eigen::Vector3f &dirGravityInBody);
+
+    // Discard a prior that has not been consumed yet.
+    void ClearGravityPrior();
+
     void ActivateLocalizationMode();
     // This resumes local mapping thread and performs SLAM again.
     void DeactivateLocalizationMode();

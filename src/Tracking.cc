@@ -28,6 +28,7 @@
 #include "KannalaBrandt8.h"
 #include "MLPnPsolver.h"
 #include "GeometricTools.h"
+#include "TuningParams.h"
 
 #include <iostream>
 
@@ -581,9 +582,13 @@ void Tracking::newParameterLoader(Settings *settings) {
             mDepthMapFactor = 1.0f/mDepthMapFactor;
     }
 
-    mMinFrames = 0;
+    // Upstream hardcodes mMinFrames = 0, which lets NeedNewKeyFrame's c1b fire on
+    // nearly every frame whenever LocalMapping happens to be idle. See
+    // Tracking.minFramesBetweenKFs in include/TuningParams.h.
+    mMinFrames = (Tuning::minFramesBetweenKFs >= 0) ? Tuning::minFramesBetweenKFs : 0;
     mMaxFrames = settings->fps();
     mbRGB = settings->rgb();
+    cout << "- min frames between keyframes: " << mMinFrames << endl;
 
     //ORB parameters
     int nFeatures = settings->nFeatures();
@@ -1154,10 +1159,12 @@ bool Tracking::ParseCamParamFile(cv::FileStorage &fSettings)
         fps=30;
 
     // Max/Min Frames to insert keyframes and to check relocalisation
-    mMinFrames = 0;
+    // See Tracking.minFramesBetweenKFs in include/TuningParams.h; upstream is 0.
+    mMinFrames = (Tuning::minFramesBetweenKFs >= 0) ? Tuning::minFramesBetweenKFs : 0;
     mMaxFrames = fps;
 
     cout << "- fps: " << fps << endl;
+    cout << "- min frames between keyframes: " << mMinFrames << endl;
 
 
     int nRGB = fSettings["Camera.RGB"];

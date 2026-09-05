@@ -40,6 +40,7 @@
 #include<mutex>
 
 #include "OptimizableTypes.h"
+#include "TuningParams.h"
 
 
 namespace ORB_SLAM3
@@ -2384,12 +2385,22 @@ void Optimizer::LocalInertialBA(KeyFrame *pKF, bool *pbStopFlag, Map *pMap, int&
 {
     Map* pCurrentMap = pKF->GetMap();
 
-    int maxOpt=10;
-    int opt_it=10;
+    // Window size and iteration count for the sliding-window inertial BA. This
+    // runs once per keyframe on the LocalMapping thread and is the dominant
+    // per-keyframe cost, so these two numbers set that thread's CPU floor.
+    // Overridable via LocalMapping.baWindowKFs / baIterations (and the *Large
+    // variants) -- see include/TuningParams.h. Defaults are upstream's 10/10 and
+    // 25/4.
+    //
+    // Note that bLarge is `matchesInliers > 75 && monocular`, which on a
+    // well-tracked monocular-inertial rig is true essentially always, so the
+    // *Large pair is the one that actually governs steady-state cost.
+    int maxOpt = (Tuning::localBAWindowKFs  > 0) ? Tuning::localBAWindowKFs  : 10;
+    int opt_it = (Tuning::localBAIterations > 0) ? Tuning::localBAIterations : 10;
     if(bLarge)
     {
-        maxOpt=25;
-        opt_it=4;
+        maxOpt = (Tuning::localBAWindowKFsLarge  > 0) ? Tuning::localBAWindowKFsLarge  : 25;
+        opt_it = (Tuning::localBAIterationsLarge > 0) ? Tuning::localBAIterationsLarge : 4;
     }
     const int Nd = std::min((int)pCurrentMap->KeyFramesInMap()-2,maxOpt);
     const unsigned long maxKFid = pKF->mnId;
