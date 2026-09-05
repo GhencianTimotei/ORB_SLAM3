@@ -1743,7 +1743,7 @@ bool Tracking::PredictStateIMU()
         return false;
     }
 
-    if(mbMapUpdated && mpLastKeyFrame)
+    if(mbMapUpdated && mpLastKeyFrame && mpImuPreintegratedFromLastKF)
     {
         const Eigen::Vector3f twb1 = mpLastKeyFrame->GetImuPosition();
         const Eigen::Matrix3f Rwb1 = mpLastKeyFrame->GetImuRotation();
@@ -1761,7 +1761,7 @@ bool Tracking::PredictStateIMU()
         mCurrentFrame.mPredBias = mCurrentFrame.mImuBias;
         return true;
     }
-    else if(!mbMapUpdated)
+    else if(!mbMapUpdated && mCurrentFrame.mpImuPreintegratedFrame)
     {
         const Eigen::Vector3f twb1 = mLastFrame.GetImuPosition();
         const Eigen::Matrix3f Rwb1 = mLastFrame.GetImuRotation();
@@ -1780,7 +1780,23 @@ bool Tracking::PredictStateIMU()
         return true;
     }
     else
+    {
+        // Either branch above can also fail its extra null check (guarding
+        // mpImuPreintegratedFromLastKF / mCurrentFrame.mpImuPreintegratedFrame):
+        // both can legitimately be null for a frame or two right after an
+        // active-map reset (Tracking::ResetActiveMap/CreateMapInAtlas null
+        // mpLastKeyFrame but PreintegrateIMU() can bail out early -- before
+        // setting mCurrentFrame.mpImuPreintegratedFrame -- if IMU data is
+        // stale/missing for that frame, per the "does not exist" diagnostic
+        // upstream already prints for the analogous case in PreintegrateIMU()
+        // without ever guarding it). Matched a live SIGSEGV in this exact
+        // function (PredictStateIMU -> TrackWithMotionModel) dereferencing
+        // one of these two pointers unconditionally. Skipping IMU prediction
+        // for that frame (return false, same as the "No last frame" case
+        // above) is safe -- TrackWithMotionModel/TrackReferenceKeyFrame
+        // already handle a false return here.
         cout << "not IMU prediction!!" << endl;
+    }
 
     return false;
 }
