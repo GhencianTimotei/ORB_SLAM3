@@ -5058,29 +5058,51 @@ int Optimizer::PoseInertialOptimizationLastFrame(Frame *pFrame, bool bRecInit)
     VAk->setFixed(false);
     optimizer.addVertex(VAk);
 
-    EdgeInertial* ei = new EdgeInertial(pFrame->mpImuPreintegratedFrame);
+    // pFrame->mpImuPreintegratedFrame (and mpImuPreintegrated, assigned in
+    // the same statement in Tracking::PreintegrateIMU()) can legitimately be
+    // null for a frame where IMU integration bailed out early -- e.g. an
+    // "Empty IMU measurements vector!!!" dropout. EdgeInertial's constructor
+    // dereferences it unconditionally, so constructing it here regardless
+    // segfaulted (matches a live SIGSEGV in EdgeInertial::EdgeInertial, via
+    // TrackLocalMap -> PoseInertialOptimizationLastFrame). The sibling
+    // multi-keyframe BA functions (LocalInertialBA / FullInertialBA) already
+    // guard this exact condition ("ERROR building inertial edge" + skip);
+    // this single-frame function was missed when those were fixed. Skip all
+    // three inertial-random-walk edges here too, same pattern already used
+    // below for EdgePriorPoseImu/pFp->mpcpi in this function.
+    EdgeInertial* ei = nullptr;
+    EdgeGyroRW* egr = nullptr;
+    EdgeAccRW* ear = nullptr;
+    if (!pFrame->mpImuPreintegratedFrame)
+    {
+        Verbose::PrintMess("ERROR building inertial edge: pFrame->mpImuPreintegratedFrame does not exist!!! Frame " + to_string(pFrame->mnId), Verbose::VERBOSITY_NORMAL);
+    }
+    else
+    {
+        ei = new EdgeInertial(pFrame->mpImuPreintegratedFrame);
 
-    ei->setVertex(0, VPk);
-    ei->setVertex(1, VVk);
-    ei->setVertex(2, VGk);
-    ei->setVertex(3, VAk);
-    ei->setVertex(4, VP);
-    ei->setVertex(5, VV);
-    optimizer.addEdge(ei);
+        ei->setVertex(0, VPk);
+        ei->setVertex(1, VVk);
+        ei->setVertex(2, VGk);
+        ei->setVertex(3, VAk);
+        ei->setVertex(4, VP);
+        ei->setVertex(5, VV);
+        optimizer.addEdge(ei);
 
-    EdgeGyroRW* egr = new EdgeGyroRW();
-    egr->setVertex(0,VGk);
-    egr->setVertex(1,VG);
-    Eigen::Matrix3d InfoG = pFrame->mpImuPreintegrated->C.block<3,3>(9,9).cast<double>().inverse();
-    egr->setInformation(InfoG);
-    optimizer.addEdge(egr);
+        egr = new EdgeGyroRW();
+        egr->setVertex(0,VGk);
+        egr->setVertex(1,VG);
+        Eigen::Matrix3d InfoG = pFrame->mpImuPreintegrated->C.block<3,3>(9,9).cast<double>().inverse();
+        egr->setInformation(InfoG);
+        optimizer.addEdge(egr);
 
-    EdgeAccRW* ear = new EdgeAccRW();
-    ear->setVertex(0,VAk);
-    ear->setVertex(1,VA);
-    Eigen::Matrix3d InfoA = pFrame->mpImuPreintegrated->C.block<3,3>(12,12).cast<double>().inverse();
-    ear->setInformation(InfoA);
-    optimizer.addEdge(ear);
+        ear = new EdgeAccRW();
+        ear->setVertex(0,VAk);
+        ear->setVertex(1,VA);
+        Eigen::Matrix3d InfoA = pFrame->mpImuPreintegrated->C.block<3,3>(12,12).cast<double>().inverse();
+        ear->setInformation(InfoA);
+        optimizer.addEdge(ear);
+    }
 
     // pFp->mpcpi is null for a previous frame that never accumulated a
     // ConstraintPoseImu -- e.g. the first frame tracked right after
@@ -5248,19 +5270,25 @@ int Optimizer::PoseInertialOptimizationLastFrame(Frame *pFrame, bool bRecInit)
     Eigen::Matrix<double,30,30> H;
     H.setZero();
 
-    H.block<24,24>(0,0)+= ei->GetHessian();
+    if (ei) H.block<24,24>(0,0)+= ei->GetHessian();
 
-    Eigen::Matrix<double,6,6> Hgr = egr->GetHessian();
-    H.block<3,3>(9,9) += Hgr.block<3,3>(0,0);
-    H.block<3,3>(9,24) += Hgr.block<3,3>(0,3);
-    H.block<3,3>(24,9) += Hgr.block<3,3>(3,0);
-    H.block<3,3>(24,24) += Hgr.block<3,3>(3,3);
+    if (egr)
+    {
+        Eigen::Matrix<double,6,6> Hgr = egr->GetHessian();
+        H.block<3,3>(9,9) += Hgr.block<3,3>(0,0);
+        H.block<3,3>(9,24) += Hgr.block<3,3>(0,3);
+        H.block<3,3>(24,9) += Hgr.block<3,3>(3,0);
+        H.block<3,3>(24,24) += Hgr.block<3,3>(3,3);
+    }
 
-    Eigen::Matrix<double,6,6> Har = ear->GetHessian();
-    H.block<3,3>(12,12) += Har.block<3,3>(0,0);
-    H.block<3,3>(12,27) += Har.block<3,3>(0,3);
-    H.block<3,3>(27,12) += Har.block<3,3>(3,0);
-    H.block<3,3>(27,27) += Har.block<3,3>(3,3);
+    if (ear)
+    {
+        Eigen::Matrix<double,6,6> Har = ear->GetHessian();
+        H.block<3,3>(12,12) += Har.block<3,3>(0,0);
+        H.block<3,3>(12,27) += Har.block<3,3>(0,3);
+        H.block<3,3>(27,12) += Har.block<3,3>(3,0);
+        H.block<3,3>(27,27) += Har.block<3,3>(3,3);
+    }
 
     if (ep) H.block<15,15>(0,0) += ep->GetHessian();
 
