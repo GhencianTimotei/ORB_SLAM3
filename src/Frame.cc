@@ -83,6 +83,7 @@ Frame::Frame(const Frame &frame)
     if(frame.mbHasPose)
         SetPose(frame.GetPose());
 
+    mVw.setZero();
     if(frame.HasVelocity())
     {
         SetVelocity(frame.GetVelocity());
@@ -451,6 +452,8 @@ void Frame::SetVelocity(Eigen::Vector3f Vwb)
 
 Eigen::Vector3f Frame::GetVelocity() const
 {
+    if(!mbHasVelocity)
+        return Eigen::Vector3f::Zero();
     return mVw;
 }
 

@@ -497,14 +497,13 @@ EdgeInertial::EdgeInertial(IMU::Preintegrated *pInt):JRg(pInt->JRg.cast<double>(
     resize(6);
     g << 0, 0, -IMU::GRAVITY_VALUE;
 
-    Matrix9d Info = pInt->C.block<9,9>(0,0).cast<double>().inverse();
-    Info = (Info+Info.transpose())/2;
-    Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double,9,9> > es(Info);
-    Eigen::Matrix<double,9,1> eigs = es.eigenvalues();
-    for(int i=0;i<9;i++)
-        if(eigs[i]<1e-12)
-            eigs[i]=0;
-    Info = es.eigenvectors()*eigs.asDiagonal()*es.eigenvectors().transpose();
+    // A never-reset/unbounded preintegration (e.g. localization mode, where
+    // no keyframe exists to reset mpImuPreintegratedFromLastKF) inverts to a
+    // non-finite information matrix; degrade to zero information (this edge
+    // contributes nothing) rather than feeding NaN/inf into the solver.
+    Matrix9d Info;
+    if (!InvertCovariance<9>(pInt->C.block<9,9>(0,0).cast<double>(), Info))
+        Info.setZero();
     setInformation(Info);
 }
 
@@ -601,14 +600,9 @@ EdgeInertialGS::EdgeInertialGS(IMU::Preintegrated *pInt):JRg(pInt->JRg.cast<doub
     resize(8);
     gI << 0, 0, -IMU::GRAVITY_VALUE;
 
-    Matrix9d Info = pInt->C.block<9,9>(0,0).cast<double>().inverse();
-    Info = (Info+Info.transpose())/2;
-    Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double,9,9> > es(Info);
-    Eigen::Matrix<double,9,1> eigs = es.eigenvalues();
-    for(int i=0;i<9;i++)
-        if(eigs[i]<1e-12)
-            eigs[i]=0;
-    Info = es.eigenvectors()*eigs.asDiagonal()*es.eigenvectors().transpose();
+    Matrix9d Info;
+    if (!InvertCovariance<9>(pInt->C.block<9,9>(0,0).cast<double>(), Info))
+        Info.setZero();
     setInformation(Info);
 }
 

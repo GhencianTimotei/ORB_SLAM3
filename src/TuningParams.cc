@@ -11,6 +11,7 @@ namespace ORB_SLAM3
 // Sentinels: negative means "upstream constant", so a settings file that
 // mentions none of these reproduces stock ORB-SLAM3 exactly.
 int   Tuning::minFramesBetweenKFs    = -1;
+int   Tuning::framesToResetIMU       = -1;
 int   Tuning::localBAWindowKFs       = -1;
 int   Tuning::localBAIterations      = -1;
 int   Tuning::localBAWindowKFsLarge  = -1;
@@ -66,6 +67,7 @@ void Tuning::LoadFromSettings(const std::string &strSettingsFile)
     }
 
     readInt(fs,   "Tracking.minFramesBetweenKFs",  minFramesBetweenKFs);
+    readInt(fs,   "Tracking.framesToResetIMU",     framesToResetIMU);
     readInt(fs,   "LocalMapping.baWindowKFs",      localBAWindowKFs);
     readInt(fs,   "LocalMapping.baIterations",     localBAIterations);
     readInt(fs,   "LocalMapping.baWindowKFsLarge", localBAWindowKFsLarge);
@@ -91,6 +93,11 @@ void Tuning::Print()
 
     std::cout << std::endl << "Tuning overrides:" << std::endl;
     showInt("Tracking.minFramesBetweenKFs",   minFramesBetweenKFs,    0);
+    std::cout << "  Tracking.framesToResetIMU: ";
+    if (framesToResetIMU < 0)
+        std::cout << "fps  (default)" << std::endl;
+    else
+        std::cout << framesToResetIMU << "  (override, upstream fps)" << std::endl;
     showInt("LocalMapping.baWindowKFs",       localBAWindowKFs,      10);
     showInt("LocalMapping.baIterations",      localBAIterations,     10);
     showInt("LocalMapping.baWindowKFsLarge",  localBAWindowKFsLarge, 25);

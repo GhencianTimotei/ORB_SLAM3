@@ -47,7 +47,8 @@ Tracking::Tracking(System *pSys, ORBVocabulary* pVoc, FrameDrawer *pFrameDrawer,
     mbOnlyTracking(false), mbMapUpdated(false), mbVO(false), mpORBVocabulary(pVoc), mpKeyFrameDB(pKFDB),
     mbReadyToInitializate(false), mpSystem(pSys), mpViewer(NULL), bStepByStep(false),
     mpFrameDrawer(pFrameDrawer), mpMapDrawer(pMapDrawer), mpAtlas(pAtlas), mnLastRelocFrameId(0), mnLastKeyFrameId(0), time_recently_lost(5.0),
-    mnInitialFrameId(0), mbCreatedMap(false), mnFirstFrameId(0), mpCamera2(nullptr), mpLastKeyFrame(static_cast<KeyFrame*>(NULL))
+    mnInitialFrameId(0), mbCreatedMap(false), mnFirstFrameId(0), mpCamera2(nullptr), mpLastKeyFrame(static_cast<KeyFrame*>(NULL)),
+    mpRelocKF(static_cast<KeyFrame*>(NULL)), mbImuResetPending(false)
 {
     // Load camera parameters from settings file
     if(settings){
@@ -78,7 +79,7 @@ Tracking::Tracking(System *pSys, ORBVocabulary* pVoc, FrameDrawer *pFrameDrawer,
                 std::cout << "*Error with the IMU parameters in the config file*" << std::endl;
             }
 
-            mnFramesToResetIMU = mMaxFrames;
+            mnFramesToResetIMU = (Tuning::framesToResetIMU > 0) ? Tuning::framesToResetIMU : mMaxFrames;
         }
 
         if(!b_parse_cam || !b_parse_orb || !b_parse_imu)
@@ -589,6 +590,12 @@ void Tracking::newParameterLoader(Settings *settings) {
     mMaxFrames = settings->fps();
     mbRGB = settings->rgb();
     cout << "- min frames between keyframes: " << mMinFrames << endl;
+
+    // newParameterLoader's Settings-based path never set this otherwise (only the
+    // legacy cv::FileStorage path above did, and only for inertial sensors), leaving
+    // it uninitialized for every Settings-constructed Tracking. See
+    // Tracking.framesToResetIMU in include/TuningParams.h.
+    mnFramesToResetIMU = (Tuning::framesToResetIMU > 0) ? Tuning::framesToResetIMU : mMaxFrames;
 
     //ORB parameters
     int nFeatures = settings->nFeatures();
@@ -1682,8 +1689,22 @@ void Tracking::PreintegrateIMU()
     }
 
     const int n = mvImuFromLastFrame.size()-1;
-    if(n==0){
+    if(n<=0){
+        // n==0 (a single sample, nothing to integrate between) and n<0 (every queued
+        // sample was older than mCurrentFrame.mpPrevFrame's timestamp and got popped as
+        // stale) both used to fall through here without touching the frame's
+        // preintegration pointers -- leaving mCurrentFrame with whatever non-null
+        // mpImuPreintegratedFrame/mpImuPreintegrated/mpLastKeyFrame its copy constructor
+        // gave it from mLastFrame. Those stale pointers then pass every downstream null
+        // guard while actually describing the *previous* frame's integration window,
+        // publishing a never-integrated (all-zero covariance) Preintegrated as if it
+        // were this frame's. Null them out instead so callers see "no preintegration"
+        // and skip, exactly like the mCurrentFrame.mpPrevFrame==NULL case above.
         cout << "Empty IMU measurements vector!!!\n";
+        mCurrentFrame.mpImuPreintegratedFrame = nullptr;
+        mCurrentFrame.mpImuPreintegrated = nullptr;
+        mCurrentFrame.mpLastKeyFrame = nullptr;
+        mCurrentFrame.setIntegrated();
         return;
     }
 
@@ -1696,12 +1717,25 @@ void Tracking::PreintegrateIMU()
         if((i==0) && (i<(n-1)))
         {
             float tab = mvImuFromLastFrame[i+1].t-mvImuFromLastFrame[i].t;
-            float tini = mvImuFromLastFrame[i].t-mCurrentFrame.mpPrevFrame->mTimeStamp;
-            acc = (mvImuFromLastFrame[i].a+mvImuFromLastFrame[i+1].a-
-                    (mvImuFromLastFrame[i+1].a-mvImuFromLastFrame[i].a)*(tini/tab))*0.5f;
-            angVel = (mvImuFromLastFrame[i].w+mvImuFromLastFrame[i+1].w-
-                    (mvImuFromLastFrame[i+1].w-mvImuFromLastFrame[i].w)*(tini/tab))*0.5f;
-            tstep = mvImuFromLastFrame[i+1].t-mCurrentFrame.mpPrevFrame->mTimeStamp;
+            if(tab==0)
+            {
+                // Duplicate IMU timestamps: tini/tab below would be inf/NaN, poisoning
+                // dR/JRg for the rest of this preintegration's lifetime (it's never
+                // reset mid-window). Fall back to the plain midpoint average used by the
+                // interior-sample branch just below instead of dividing by zero.
+                acc = (mvImuFromLastFrame[i].a+mvImuFromLastFrame[i+1].a)*0.5f;
+                angVel = (mvImuFromLastFrame[i].w+mvImuFromLastFrame[i+1].w)*0.5f;
+                tstep = mvImuFromLastFrame[i+1].t-mCurrentFrame.mpPrevFrame->mTimeStamp;
+            }
+            else
+            {
+                float tini = mvImuFromLastFrame[i].t-mCurrentFrame.mpPrevFrame->mTimeStamp;
+                acc = (mvImuFromLastFrame[i].a+mvImuFromLastFrame[i+1].a-
+                        (mvImuFromLastFrame[i+1].a-mvImuFromLastFrame[i].a)*(tini/tab))*0.5f;
+                angVel = (mvImuFromLastFrame[i].w+mvImuFromLastFrame[i+1].w-
+                        (mvImuFromLastFrame[i+1].w-mvImuFromLastFrame[i].w)*(tini/tab))*0.5f;
+                tstep = mvImuFromLastFrame[i+1].t-mCurrentFrame.mpPrevFrame->mTimeStamp;
+            }
         }
         else if(i<(n-1))
         {
@@ -1712,12 +1746,21 @@ void Tracking::PreintegrateIMU()
         else if((i>0) && (i==(n-1)))
         {
             float tab = mvImuFromLastFrame[i+1].t-mvImuFromLastFrame[i].t;
-            float tend = mvImuFromLastFrame[i+1].t-mCurrentFrame.mTimeStamp;
-            acc = (mvImuFromLastFrame[i].a+mvImuFromLastFrame[i+1].a-
-                    (mvImuFromLastFrame[i+1].a-mvImuFromLastFrame[i].a)*(tend/tab))*0.5f;
-            angVel = (mvImuFromLastFrame[i].w+mvImuFromLastFrame[i+1].w-
-                    (mvImuFromLastFrame[i+1].w-mvImuFromLastFrame[i].w)*(tend/tab))*0.5f;
-            tstep = mCurrentFrame.mTimeStamp-mvImuFromLastFrame[i].t;
+            if(tab==0)
+            {
+                acc = (mvImuFromLastFrame[i].a+mvImuFromLastFrame[i+1].a)*0.5f;
+                angVel = (mvImuFromLastFrame[i].w+mvImuFromLastFrame[i+1].w)*0.5f;
+                tstep = mCurrentFrame.mTimeStamp-mvImuFromLastFrame[i].t;
+            }
+            else
+            {
+                float tend = mvImuFromLastFrame[i+1].t-mCurrentFrame.mTimeStamp;
+                acc = (mvImuFromLastFrame[i].a+mvImuFromLastFrame[i+1].a-
+                        (mvImuFromLastFrame[i+1].a-mvImuFromLastFrame[i].a)*(tend/tab))*0.5f;
+                angVel = (mvImuFromLastFrame[i].w+mvImuFromLastFrame[i+1].w-
+                        (mvImuFromLastFrame[i+1].w-mvImuFromLastFrame[i].w)*(tend/tab))*0.5f;
+                tstep = mCurrentFrame.mTimeStamp-mvImuFromLastFrame[i].t;
+            }
         }
         else if((i==0) && (i==(n-1)))
         {
@@ -1727,7 +1770,14 @@ void Tracking::PreintegrateIMU()
         }
 
         if (!mpImuPreintegratedFromLastKF)
+        {
+            // Previously logged this and dereferenced the null pointer on the very next
+            // line anyway. Skip this sample instead -- pImuPreintegratedFromLastFrame
+            // (the frame-to-frame integrator, always non-null here) still gets it.
             cout << "mpImuPreintegratedFromLastKF does not exist" << endl;
+            pImuPreintegratedFromLastFrame->IntegrateNewMeasurement(acc,angVel,tstep);
+            continue;
+        }
         mpImuPreintegratedFromLastKF->IntegrateNewMeasurement(acc,angVel,tstep);
         pImuPreintegratedFromLastFrame->IntegrateNewMeasurement(acc,angVel,tstep);
     }
@@ -1768,8 +1818,13 @@ bool Tracking::PredictStateIMU()
         mCurrentFrame.mPredBias = mCurrentFrame.mImuBias;
         return true;
     }
-    else if(!mbMapUpdated && mCurrentFrame.mpImuPreintegratedFrame)
+    else if(!mbMapUpdated && mCurrentFrame.mpImuPreintegratedFrame && mLastFrame.HasVelocity())
     {
+        // mLastFrame.HasVelocity() precondition: without it, a not-yet-seeded
+        // mLastFrame (mbHasVelocity still false, e.g. before Relocalization() has ever
+        // run) propagates Vwb1 = 0 below as if it were a real measured velocity instead
+        // of degrading to relocalization-only, which is what the localization-mode
+        // RECENTLY_LOST dead-reckoning path (Track()) expects on a false return here.
         const Eigen::Vector3f twb1 = mLastFrame.GetImuPosition();
         const Eigen::Matrix3f Rwb1 = mLastFrame.GetImuRotation();
         const Eigen::Vector3f Vwb1 = mLastFrame.GetVelocity();
@@ -1815,26 +1870,37 @@ void Tracking::ResetFrameIMU()
     // + mnFramesToResetIMU). Reuses the propagation idiom from UpdateFrameIMU()
     // but skips its spin-wait and mlRelativeFramePoses walk, which don't apply
     // (and aren't safe) at this call site inside Track().
-    if(!mpLastKeyFrame)
-    {
-        Verbose::PrintMess("ResetFrameIMU: no last keyframe, skipping IMU reset", Verbose::VERBOSITY_NORMAL);
-        return;
-    }
-
-    // Bias from the last keyframe: created after relocalization, so its bias
-    // came from local BA on the relocalized map. mLastBias is unsafe here --
-    // it is only refreshed once mnId > mnLastRelocFrameId+30 below, a hardcoded
-    // threshold that only matches mnFramesToResetIMU (== fps) at 30 fps.
+    //
+    // In localization mode mpLastKeyFrame is permanently NULL (no keyframe is ever
+    // created -- see NeedNewKeyFrame()), so the old "if(!mpLastKeyFrame) return;"
+    // early-out made this function a silent no-op on that path. Bias/velocity source
+    // falls back through three levels instead: the last keyframe (mapping mode, or a
+    // localization-mode run that had one from before mode switch), else the keyframe
+    // Relocalization() matched into (mpRelocKF), else whatever mLastBias already holds.
     IMU::Bias b;
-    if(mpLastKeyFrame->mnFrameId >= mnLastRelocFrameId)
+    bool bHaveSource = true;
+    if(mpLastKeyFrame && mpLastKeyFrame->mnFrameId >= mnLastRelocFrameId)
     {
         b = mpLastKeyFrame->GetImuBias();
     }
+    else if(mpRelocKF)
+    {
+        Verbose::PrintMess("ResetFrameIMU: no usable last keyframe, using relocalization keyframe bias", Verbose::VERBOSITY_NORMAL);
+        b = mpRelocKF->GetImuBias();
+    }
+    else if(mLastFrame.HasVelocity())
+    {
+        Verbose::PrintMess("ResetFrameIMU: no keyframe available, falling back to last frame bias", Verbose::VERBOSITY_NORMAL);
+        b = mLastBias;
+    }
     else
     {
-        Verbose::PrintMess("ResetFrameIMU: last keyframe predates relocalization, falling back to current frame bias", Verbose::VERBOSITY_NORMAL);
-        b = mCurrentFrame.mImuBias;
+        Verbose::PrintMess("ResetFrameIMU: no bias/velocity source available, skipping IMU reset", Verbose::VERBOSITY_NORMAL);
+        bHaveSource = false;
     }
+
+    if(!bHaveSource)
+        return;
 
     mLastBias = b;
     mLastFrame.SetNewBias(b);
@@ -1862,6 +1928,13 @@ void Tracking::ResetFrameIMU()
                                           Vwb1 + Gz*t12 + Rwb1*mLastFrame.mpImuPreintegrated->GetUpdatedDeltaVelocity());
         }
     }
+    else if(mpRelocKF)
+    {
+        // Localization mode: pose is already correct from visual PoseOptimization, only
+        // velocity needs seeding, from the keyframe the last relocalization matched.
+        Verbose::PrintMess("ResetFrameIMU: mLastFrame has no keyframe, seeding velocity from relocalization keyframe", Verbose::VERBOSITY_NORMAL);
+        mLastFrame.SetVelocity(mpRelocKF->GetVelocity());
+    }
     else
     {
         Verbose::PrintMess("ResetFrameIMU: mLastFrame missing keyframe/preintegration, skipping its pose/velocity recompute", Verbose::VERBOSITY_NORMAL);
@@ -1878,19 +1951,49 @@ void Tracking::ResetFrameIMU()
                                       twb1 + Vwb1*t12 + 0.5f*t12*t12*Gz+ Rwb1*mCurrentFrame.mpImuPreintegrated->GetUpdatedDeltaPosition(),
                                       Vwb1 + Gz*t12 + Rwb1*mCurrentFrame.mpImuPreintegrated->GetUpdatedDeltaVelocity());
     }
+    else if(mpRelocKF)
+    {
+        Verbose::PrintMess("ResetFrameIMU: mCurrentFrame has no keyframe, seeding velocity from relocalization keyframe", Verbose::VERBOSITY_NORMAL);
+        mCurrentFrame.SetVelocity(mpRelocKF->GetVelocity());
+    }
     else
     {
         Verbose::PrintMess("ResetFrameIMU: mCurrentFrame missing keyframe/preintegration, skipping its pose/velocity recompute", Verbose::VERBOSITY_NORMAL);
     }
 
-    // Rebuild the keyframe-level preintegration so it no longer spans the
-    // relocalization outage -- this is what kills "ERROR building inertial edge".
-    if(mpImuPreintegratedFromLastKF)
-        delete mpImuPreintegratedFromLastKF;
+    // Do NOT delete the old mpImuPreintegratedFromLastKF: it is aliased by
+    // mLastFrame.mpImuPreintegrated (and, before this reassignment, by
+    // mCurrentFrame's own preintegration too), and is read as
+    // pFrame->mpImuPreintegrated from Optimizer::PoseInertialOptimizationLastFrame.
+    // Deleting it here while still aliased is a use-after-free. Instead allocate the
+    // replacement and leave the old one -- the same deliberate non-transfer already
+    // used by CreateNewKeyFrame() when it starts a fresh mpImuPreintegratedFromLastKF.
     mpImuPreintegratedFromLastKF = new IMU::Preintegrated(b, *mpImuCalib);
     mCurrentFrame.mpImuPreintegrated = mpImuPreintegratedFromLastKF;
+    mLastFrame.mpImuPreintegrated = mpImuPreintegratedFromLastKF;
+
+    // Synthesize the initial marginalization prior. Without this, the next
+    // PoseInertialOptimizationLastFrame call finds pFp->mpcpi == NULL, logs
+    // "pFp->mpcpi does not exist!!!", and leaves the previous-frame velocity/bias
+    // vertices completely unconstrained -- which is what diverges to NaN and aborts in
+    // Sophus::SO3::exp. The information matrix is tighter than a freshly-marginalized
+    // one (1e4 vs. the ~1e2-1e6 priorG/priorA scale used elsewhere) because this is the
+    // map keyframe's converged bias/velocity, not a fresh single-frame estimate.
+    {
+        Eigen::Matrix3d Rwb = mLastFrame.GetImuRotation().cast<double>();
+        Eigen::Vector3d twb = mLastFrame.GetImuPosition().cast<double>();
+        Eigen::Vector3d vwb = mLastFrame.GetVelocity().cast<double>();
+        Eigen::Vector3d bg(b.bwx, b.bwy, b.bwz);
+        Eigen::Vector3d ba(b.bax, b.bay, b.baz);
+        Matrix15d H = Matrix15d::Identity() * 1e4;
+
+        if(mLastFrame.mpcpi)
+            delete mLastFrame.mpcpi;
+        mLastFrame.mpcpi = new ConstraintPoseImu(Rwb, twb, vwb, bg, ba, H);
+    }
 
     mnFirstImuFrameId = mCurrentFrame.mnId;
+    mbImuResetPending = false;
 }
 
 
@@ -1905,7 +2008,7 @@ void Tracking::Track()
         mbStep = false;
     }
 
-    if(mpLocalMapper->mbBadImu)
+    if(mpLocalMapper->mbBadImu && !mbOnlyTracking)
     {
         cout << "TRACK: Reset map because local mapper set the bad imu flag " << endl;
         mpSystem->ResetActiveMap();
@@ -1925,7 +2028,19 @@ void Tracking::Track()
             cerr << "ERROR: Frame with a timestamp older than previous frame detected!" << endl;
             unique_lock<mutex> lock(mMutexImuQueue);
             mlQueueImuData.clear();
-            CreateMapInAtlas();
+            // Localization mode must never abandon the loaded map for a fresh one --
+            // CreateMapInAtlas() would do exactly that. Drop to LOST instead so the
+            // next relocalization re-seeds everything cleanly.
+            if(mbOnlyTracking)
+            {
+                mCurrentFrame.mpImuPreintegrated = nullptr;
+                mCurrentFrame.mpLastKeyFrame = nullptr;
+                mState = LOST;
+            }
+            else
+            {
+                CreateMapInAtlas();
+            }
             return;
         }
         else if(mCurrentFrame.mTimeStamp>mLastFrame.mTimeStamp+1.0)
@@ -1934,8 +2049,21 @@ void Tracking::Track()
             // cout << "id last: " << mLastFrame.mnId << "    id curr: " << mCurrentFrame.mnId << endl;
             if(mpAtlas->isInertial())
             {
-
-                if(mpAtlas->isImuInitialized())
+                // Same reasoning as above: ResetActiveMap()/CreateMapInAtlas() both
+                // destroy or replace the loaded map, which localization mode must never
+                // do. Clear the stale IMU queue/preintegration and go LOST instead --
+                // Relocalization() + ResetFrameIMU() re-seed bias/velocity/mpcpi from the
+                // matched keyframe once tracking recovers.
+                if(mbOnlyTracking)
+                {
+                    cout << "Timestamp jump detected. State set to LOST (localization mode: map preserved)." << endl;
+                    unique_lock<mutex> lock(mMutexImuQueue);
+                    mlQueueImuData.clear();
+                    mCurrentFrame.mpImuPreintegrated = nullptr;
+                    mCurrentFrame.mpLastKeyFrame = nullptr;
+                    mState = LOST;
+                }
+                else if(mpAtlas->isImuInitialized())
                 {
                     cout << "Timestamp jump detected. State set to LOST. Reseting IMU integration..." << endl;
                     if(!pCurrentMap->GetIniertialBA2())
@@ -2147,12 +2275,45 @@ void Tracking::Track()
         }
         else
         {
-            // Localization Mode: Local Mapping is deactivated (TODO Not available in inertial mode)
-            if(mState==LOST || mState==RECENTLY_LOST)
+            // Localization Mode: Local Mapping is deactivated. No keyframe is ever
+            // created here (that state machine is a separate follow-up), so inertial
+            // tracking is a frame-to-frame filter: Relocalization() seeds bias/velocity
+            // /mpcpi (see its inertial-seeding block and ResetFrameIMU()), and every
+            // frame afterwards runs through PoseInertialOptimizationLastFrame carrying
+            // that state forward via the marginalization prior.
+            bool bInertial = (mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD);
+
+            if(mState==LOST)
             {
-                if(mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD)
+                if(bInertial)
                     Verbose::PrintMess("IMU. State LOST", Verbose::VERBOSITY_NORMAL);
                 bOK = Relocalization();
+            }
+            else if(mState==RECENTLY_LOST)
+            {
+                if(bInertial && pCurrentMap->isImuInitialized())
+                {
+                    // Dead-reckon with the IMU while still trying to relocalize every
+                    // frame -- unlike the mapping-mode RECENTLY_LOST handling above,
+                    // there is no LocalMapping thread here that could otherwise recover
+                    // the map, so relocalization is the only path back to zero-drift
+                    // tracking within the bounded window.
+                    bOK = PredictStateIMU();
+
+                    if(Relocalization())
+                        bOK = true;
+
+                    if(mCurrentFrame.mTimeStamp-mTimeStampLost>time_recently_lost)
+                    {
+                        mState = LOST;
+                        Verbose::PrintMess("Track Lost...", Verbose::VERBOSITY_NORMAL);
+                        bOK = false;
+                    }
+                }
+                else
+                {
+                    bOK = Relocalization();
+                }
             }
             else
             {
@@ -2258,7 +2419,7 @@ void Tracking::Track()
             if (mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD)
             {
                 Verbose::PrintMess("Track lost for less than one second...", Verbose::VERBOSITY_NORMAL);
-                if(!pCurrentMap->isImuInitialized() || !pCurrentMap->GetIniertialBA2())
+                if(!mbOnlyTracking && (!pCurrentMap->isImuInitialized() || !pCurrentMap->GetIniertialBA2()))
                 {
                     cout << "IMU is not or recently initialized. Reseting active map..." << endl;
                     mpSystem->ResetActiveMap();
@@ -2285,7 +2446,10 @@ void Tracking::Track()
         {
             if(bOK)
             {
-                if(mCurrentFrame.mnId==(mnLastRelocFrameId+mnFramesToResetIMU))
+                // >= + mbImuResetPending latch instead of ==: with plain ==, a single
+                // non-bOK frame at exactly mnLastRelocFrameId+mnFramesToResetIMU skipped
+                // the reset for the rest of the run, leaving bias/velocity/mpcpi unseeded.
+                if(mbImuResetPending && mCurrentFrame.mnId>=(mnLastRelocFrameId+mnFramesToResetIMU))
                 {
                     cout << "RESETING FRAME!!!" << endl;
                     ResetFrameIMU();
@@ -2397,6 +2561,13 @@ void Tracking::Track()
 
         if(!mCurrentFrame.mpReferenceKF)
             mCurrentFrame.mpReferenceKF = mpReferenceKF;
+
+        // Localization mode: ResetFrameIMU() synthesizes mLastFrame.mpcpi,
+        // but the copy-assignment below (Frame(mCurrentFrame)) creates a fresh
+        // mLastFrame whose mpcpi is NULL because mCurrentFrame.mpcpi is null.
+        // Move the synthesized prior onto mCurrentFrame so it survives the copy.
+        if(mbOnlyTracking && mLastFrame.mpcpi)
+            mCurrentFrame.mpcpi = mLastFrame.mpcpi;
 
         mLastFrame = Frame(mCurrentFrame);
     }
@@ -3043,6 +3214,18 @@ bool Tracking::TrackWithMotionModel()
 
     if(mbOnlyTracking)
     {
+        if (mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD)
+        {
+            // mbVO ("visual odometry": few map-point matches, mostly temporary points)
+            // describes stereo/RGBD points UpdateLastFrame() never creates for inertial
+            // sensors (it returns early for IMU_MONOCULAR). Setting it from nmatchesMap
+            // here is meaningless for inertial sensors and, worse, disables
+            // TrackLocalMap() and forces the motion-model-vs-relocalization race in
+            // Track(), which starves the inertial pose optimizer of frames it needs
+            // every step to keep the marginalization prior alive.
+            mbVO = false;
+            return true;
+        }
         mbVO = nmatchesMap<10;
         return nmatches>20;
     }
@@ -3170,8 +3353,19 @@ bool Tracking::TrackLocalMap()
 
 bool Tracking::NeedNewKeyFrame()
 {
+    // Localization mode never inserts keyframes -- checked first because the inertial
+    // block below dereferences mpLastKeyFrame unconditionally, and mpLastKeyFrame is
+    // permanently NULL in this mode (it's only ever assigned at initialization or in
+    // CreateNewKeyFrame(), both unreachable here), which would otherwise SIGSEGV on any
+    // map whose IMU isn't (yet, or by construction) initialized.
+    if(mbOnlyTracking)
+        return false;
+
     if((mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD) && !mpAtlas->GetCurrentMap()->isImuInitialized())
     {
+        if(!mpLastKeyFrame)
+            return false;
+
         if (mSensor == System::IMU_MONOCULAR && (mCurrentFrame.mTimeStamp-mpLastKeyFrame->mTimeStamp)>=0.25)
             return true;
         else if ((mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD) && (mCurrentFrame.mTimeStamp-mpLastKeyFrame->mTimeStamp)>=0.25)
@@ -3179,9 +3373,6 @@ bool Tracking::NeedNewKeyFrame()
         else
             return false;
     }
-
-    if(mbOnlyTracking)
-        return false;
 
     // If Local Mapping is freezed by a Loop Closure do not insert keyframes
     if(mpLocalMapper->isStopped() || mpLocalMapper->stopRequested()) {
@@ -3892,12 +4083,28 @@ bool Tracking::Relocalization()
         // fields PredictStateIMU() seeds from mpLastKeyFrame for the
         // RECENTLY_LOST path -- do not touch the pose itself, PnP already
         // solved that.
+        // Localization mode never creates keyframes, so PoseInertialOptimizationLastFrame
+        // reads mCurrentFrame.mpPrevFrame -- a distinct Frame object -- every frame from
+        // here on. Seeding only mCurrentFrame above leaves mLastFrame with the same
+        // garbage velocity / inconsistent bias problem the comment above describes, one
+        // frame later. Seed mLastFrame identically, and remember the matched keyframe
+        // (mpRelocKF) so ResetFrameIMU() can reach the map bias/velocity without ever
+        // needing mpLastKeyFrame, which stays NULL in this mode.
         if((mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD) &&
            pMatchedKF && pMatchedKF->GetMap()->isImuInitialized())
         {
             mCurrentFrame.SetVelocity(pMatchedKF->GetVelocity());
             mCurrentFrame.mImuBias = pMatchedKF->GetImuBias();
             mCurrentFrame.mPredBias = mCurrentFrame.mImuBias;
+
+            mLastFrame.SetVelocity(pMatchedKF->GetVelocity());
+            mLastFrame.mImuBias = pMatchedKF->GetImuBias();
+            mLastFrame.mPredBias = mLastFrame.mImuBias;
+
+            mLastBias = pMatchedKF->GetImuBias();
+            mpReferenceKF = pMatchedKF;
+            mpRelocKF = pMatchedKF;
+            mbImuResetPending = true;
         }
 
         mnLastRelocFrameId = mCurrentFrame.mnId;

@@ -255,7 +255,7 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
     }
 
     // Fix verbosity
-    Verbose::SetTh(Verbose::VERBOSITY_QUIET);
+    Verbose::SetTh(Verbose::VERBOSITY_VERBOSE);
 
 }
 
@@ -511,6 +511,21 @@ void System::ClearGravityPrior()
 
 void System::ActivateLocalizationMode()
 {
+    // Inertial sensors need LocalMapping running to ever call InitializeIMU;
+    // localization mode stops that thread, so a map that isn't already
+    // IMU-initialized can never become so here. Rather than silently tracking
+    // scale-free monocular odometry from that point on, refuse up front: map
+    // the sequence first (with localization mode off) so IMU init completes
+    // and gets saved into the atlas, then load that atlas for localization.
+    if ((mSensor == IMU_MONOCULAR || mSensor == IMU_STEREO || mSensor == IMU_RGBD)
+        && !IsCurrentMapImuInitialized())
+    {
+        throw std::runtime_error("System::ActivateLocalizationMode: current map is not "
+            "IMU-initialized. LocalMapping is deactivated in localization mode, so IMU "
+            "bias/scale/gravity can never be estimated here. Map the sequence first with "
+            "localization mode off, save that atlas, then load it for localization.");
+    }
+
     unique_lock<mutex> lock(mMutexMode);
     mbActivateLocalizationMode = true;
 }

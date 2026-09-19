@@ -57,8 +57,19 @@ public:
     void static LocalBundleAdjustment(KeyFrame* pKF, bool *pbStopFlag, Map *pMap, int& num_fixedKF, int& num_OptKF, int& num_MPs, int& num_edges);
 
     int static PoseOptimization(Frame* pFrame);
-    int static PoseInertialOptimizationLastKeyFrame(Frame* pFrame, bool bRecInit = false);
-    int static PoseInertialOptimizationLastFrame(Frame *pFrame, bool bRecInit = false);
+
+    // bLocalizationOnly: called from Tracking's mapping-deactivated
+    // localization mode, where the bias is meant to stay frozen near the
+    // relocalized-keyframe value instead of drifting freely (see docu plan
+    // "Localization mode for inertial sensors", decision "Frozen + strong
+    // prior"). PoseInertialOptimizationLastFrame adds a tight
+    // EdgePriorGyro/EdgePriorAcc to the current bias vertices when true.
+    // PoseInertialOptimizationLastKeyFrame is unreachable in that mode
+    // (NeedNewKeyFrame never fires there) and ignores the flag; it is
+    // accepted only so both signatures stay in lockstep. Default false
+    // reproduces upstream behaviour exactly.
+    int static PoseInertialOptimizationLastKeyFrame(Frame* pFrame, bool bRecInit = false, bool bLocalizationOnly = false);
+    int static PoseInertialOptimizationLastFrame(Frame *pFrame, bool bRecInit = false, bool bLocalizationOnly = false);
 
     // if bFixScale is true, 6DoF optimization (stereo,rgbd), 7DoF otherwise (mono)
     void static OptimizeEssentialGraph(Map* pMap, KeyFrame* pLoopKF, KeyFrame* pCurKF,

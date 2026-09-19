@@ -57,6 +57,16 @@ public:
     // -1 = upstream (0). A sensible value is fps/4.
     static int minFramesBetweenKFs;
 
+    // ---- Post-relocalization inertial handover ------------------------------
+    // Tracking.framesToResetIMU: how many frames after a relocalization
+    // Tracking::Track stays on vision-only PoseOptimization before handing
+    // over to the inertial optimizers (Tracking::mnFramesToResetIMU). Upstream
+    // hardcodes this to mMaxFrames, i.e. the camera fps -- about one second of
+    // vision-only tracking before bias/velocity are trusted again.
+    //
+    // -1 = upstream (mMaxFrames).
+    static int framesToResetIMU;
+
     // ---- Local inertial bundle adjustment window ---------------------------
     // Optimizer::LocalInertialBA optimises the last Nd keyframes for opt_it
     // iterations. Upstream picks between two hardcoded pairs on `bLarge`:

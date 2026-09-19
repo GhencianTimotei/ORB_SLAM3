@@ -36,6 +36,7 @@
 
 #include"Converter.h"
 #include <math.h>
+#include <cmath>
 
 namespace ORB_SLAM3
 {
@@ -492,6 +493,41 @@ public:
     const int cam_idx;
 };
 
+// Inverts a covariance block into an information matrix, refusing to
+// propagate a non-finite or singular result. A covariance that was never
+// bounded (e.g. an IMU::Preintegrated that integrates unboundedly because no
+// keyframe ever resets it, as happens in localization mode) inverts to
+// inf/NaN, which previously reached setInformation() unchecked and diverged
+// the optimizer to NaN -- the direct cause of a Sophus::SO3::exp abort
+// downstream. Returns false and leaves Info untouched on failure.
+template<int N>
+inline bool InvertCovariance(const Eigen::Matrix<double,N,N> &Cov, Eigen::Matrix<double,N,N> &Info)
+{
+    if (!Cov.allFinite())
+        return false;
+
+    Eigen::FullPivLU<Eigen::Matrix<double,N,N> > lu(Cov);
+    if (!lu.isInvertible())
+        return false;
+
+    Eigen::Matrix<double,N,N> Inf = lu.inverse();
+    if (!Inf.allFinite())
+        return false;
+
+    Inf = (Inf + Inf.transpose()) / 2.0;
+    Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double,N,N> > es(Inf);
+    if (es.info() != Eigen::Success)
+        return false;
+
+    Eigen::Matrix<double,N,1> eigs = es.eigenvalues();
+    for (int i = 0; i < N; i++)
+        if (!std::isfinite(eigs[i]) || eigs[i] < 1e-12)
+            eigs[i] = 0;
+
+    Info = es.eigenvectors() * eigs.asDiagonal() * es.eigenvectors().transpose();
+    return Info.allFinite();
+}
+
 class EdgeInertial : public g2o::BaseMultiEdge<9,Vector9d>
 {
 public:
@@ -716,7 +752,7 @@ public:
         Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double,15,15> > es(H);
         Eigen::Matrix<double,15,1> eigs = es.eigenvalues();
         for(int i=0;i<15;i++)
-            if(eigs[i]<1e-12)
+            if(!std::isfinite(eigs[i]) || eigs[i]<1e-12)
                 eigs[i]=0;
         H = es.eigenvectors()*eigs.asDiagonal()*es.eigenvectors().transpose();
     }

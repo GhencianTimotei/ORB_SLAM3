@@ -247,6 +247,17 @@ protected:
     // Last Bias Estimation (at keyframe creation)
     IMU::Bias mLastBias;
 
+    // Localization mode never creates keyframes, so mpLastKeyFrame stays NULL forever.
+    // Relocalization() stashes the matched keyframe here so ResetFrameIMU() has a bias/
+    // velocity source that doesn't depend on one.
+    KeyFrame* mpRelocKF;
+
+    // Set by Relocalization() on every successful relocalization, cleared by
+    // ResetFrameIMU() once it actually performs the bias/velocity/mpcpi reset. Latches
+    // the reset request across frames so a single non-bOK frame at exactly
+    // mnLastRelocFrameId+mnFramesToResetIMU doesn't skip the reset for the rest of the run.
+    bool mbImuResetPending;
+
     // In case of performing only localization, this flag is true when there are no matches to
     // points in the map. Still tracking will continue if there are enough matches with temporal points.
     // In that case we are doing visual odometry. The system will try to do relocalization to recover

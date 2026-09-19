@@ -4502,8 +4502,13 @@ void Optimizer::MergeInertialBA(KeyFrame* pCurrKF, KeyFrame* pMergeKF, bool *pbS
     pMap->IncreaseChangeIndex();
 }
 
-int Optimizer::PoseInertialOptimizationLastKeyFrame(Frame *pFrame, bool bRecInit)
+int Optimizer::PoseInertialOptimizationLastKeyFrame(Frame *pFrame, bool bRecInit, bool bLocalizationOnly)
 {
+    // Unreachable in localization mode (NeedNewKeyFrame never fires there);
+    // accepted only to keep this signature in lockstep with
+    // PoseInertialOptimizationLastFrame, which does use it.
+    (void)bLocalizationOnly;
+
     g2o::SparseOptimizer optimizer;
     g2o::BlockSolverX::LinearSolverType * linearSolver;
 
@@ -4886,7 +4891,7 @@ int Optimizer::PoseInertialOptimizationLastKeyFrame(Frame *pFrame, bool bRecInit
     return nInitialCorrespondences-nBad;
 }
 
-int Optimizer::PoseInertialOptimizationLastFrame(Frame *pFrame, bool bRecInit)
+int Optimizer::PoseInertialOptimizationLastFrame(Frame *pFrame, bool bRecInit, bool bLocalizationOnly)
 {
     g2o::SparseOptimizer optimizer;
     g2o::BlockSolverX::LinearSolverType * linearSolver;
@@ -4920,6 +4925,27 @@ int Optimizer::PoseInertialOptimizationLastFrame(Frame *pFrame, bool bRecInit)
     VA->setId(3);
     VA->setFixed(false);
     optimizer.addVertex(VA);
+
+    // Frozen-bias policy for localization mode: anchor the bias vertices to
+    // their current (relocalized-keyframe-seeded) value with a tight prior
+    // instead of leaving them fully free. They can still absorb drift over
+    // the optimization, they just cannot wander unconstrained the way an
+    // untethered bias vertex could when no keyframe-driven reset ever runs.
+    if (bLocalizationOnly)
+    {
+        const Eigen::Vector3f gyroPrior(pFrame->mImuBias.bwx, pFrame->mImuBias.bwy, pFrame->mImuBias.bwz);
+        const Eigen::Vector3f accPrior(pFrame->mImuBias.bax, pFrame->mImuBias.bay, pFrame->mImuBias.baz);
+
+        EdgePriorGyro* epgLoc = new EdgePriorGyro(gyroPrior);
+        epgLoc->setVertex(0, VG);
+        epgLoc->setInformation(1e5 * Eigen::Matrix3d::Identity());
+        optimizer.addEdge(epgLoc);
+
+        EdgePriorAcc* epaLoc = new EdgePriorAcc(accPrior);
+        epaLoc->setVertex(0, VA);
+        epaLoc->setInformation(1e5 * Eigen::Matrix3d::Identity());
+        optimizer.addEdge(epaLoc);
+    }
 
     // Set MapPoint vertices
     const int N = pFrame->N;
@@ -5100,19 +5126,42 @@ int Optimizer::PoseInertialOptimizationLastFrame(Frame *pFrame, bool bRecInit)
         ei->setVertex(5, VV);
         optimizer.addEdge(ei);
 
+        // mpImuPreintegratedFrame (frame-to-frame), not mpImuPreintegrated
+        // (since last keyframe): these edges connect consecutive-frame bias
+        // vertices (VGk/VAk -> VG/VA), and in localization mode
+        // mpImuPreintegrated integrates unboundedly since no keyframe is
+        // ever created to reset it -- its covariance is a NaN/inf source.
         egr = new EdgeGyroRW();
         egr->setVertex(0,VGk);
         egr->setVertex(1,VG);
-        Eigen::Matrix3d InfoG = pFrame->mpImuPreintegrated->C.block<3,3>(9,9).cast<double>().inverse();
-        egr->setInformation(InfoG);
-        optimizer.addEdge(egr);
+        Eigen::Matrix3d InfoG;
+        if (!InvertCovariance<3>(pFrame->mpImuPreintegratedFrame->C.block<3,3>(9,9).cast<double>(), InfoG))
+        {
+            Verbose::PrintMess("ERROR building EdgeGyroRW: non-finite/singular covariance. Frame " + to_string(pFrame->mnId), Verbose::VERBOSITY_NORMAL);
+            delete egr;
+            egr = nullptr;
+        }
+        else
+        {
+            egr->setInformation(InfoG);
+            optimizer.addEdge(egr);
+        }
 
         ear = new EdgeAccRW();
         ear->setVertex(0,VAk);
         ear->setVertex(1,VA);
-        Eigen::Matrix3d InfoA = pFrame->mpImuPreintegrated->C.block<3,3>(12,12).cast<double>().inverse();
-        ear->setInformation(InfoA);
-        optimizer.addEdge(ear);
+        Eigen::Matrix3d InfoA;
+        if (!InvertCovariance<3>(pFrame->mpImuPreintegratedFrame->C.block<3,3>(12,12).cast<double>(), InfoA))
+        {
+            Verbose::PrintMess("ERROR building EdgeAccRW: non-finite/singular covariance. Frame " + to_string(pFrame->mnId), Verbose::VERBOSITY_NORMAL);
+            delete ear;
+            ear = nullptr;
+        }
+        else
+        {
+            ear->setInformation(InfoA);
+            optimizer.addEdge(ear);
+        }
     }
 
     // pFp->mpcpi is null for a previous frame that never accumulated a
@@ -5270,6 +5319,18 @@ int Optimizer::PoseInertialOptimizationLastFrame(Frame *pFrame, bool bRecInit)
 
     nInliers = nInliersMono + nInliersStereo;
 
+    // A diverged Gauss-Newton solve (e.g. the previous-frame block left
+    // unanchored when pFp->mpcpi was null -- the root cause of the reported
+    // Sophus::SO3::exp NaN abort) can leave these estimates non-finite.
+    // Writing that into pFrame would poison every later frame's
+    // preintegration through mImuBias/mVw; treat it as a tracking failure
+    // instead of propagating it.
+    if (!VP->estimate().Rwb.allFinite() || !VP->estimate().twb.allFinite() ||
+        !VV->estimate().allFinite() || !VG->estimate().allFinite() || !VA->estimate().allFinite())
+    {
+        Verbose::PrintMess("PoseInertialOptimizationLastFrame: non-finite result, discarding. Frame " + to_string(pFrame->mnId), Verbose::VERBOSITY_NORMAL);
+        return 0;
+    }
 
     // Recover optimized pose, velocity and biases
     pFrame->SetImuPoseVelocity(VP->estimate().Rwb.cast<float>(), VP->estimate().twb.cast<float>(), VV->estimate().cast<float>());
@@ -5336,6 +5397,15 @@ int Optimizer::PoseInertialOptimizationLastFrame(Frame *pFrame, bool bRecInit)
 
     H = Marginalize(H,0,14);
 
+    // pFp (Tracking's mLastFrame, reached live through mpPrevFrame rather
+    // than a copy) is the sole owner of its old mpcpi here: Frame's copy
+    // constructor shares this raw pointer verbatim, so a second Frame can
+    // come to alias the object being freed below if it was ever copied from
+    // pFp/pFrame elsewhere without this delete having run first. This
+    // function is currently the only place that deletes a ConstraintPoseImu,
+    // which keeps that safe; if another call site starts deleting mpcpi
+    // directly from a Frame copy, this invariant breaks and both aliases
+    // must be nulled together.
     pFrame->mpcpi = new ConstraintPoseImu(VP->estimate().Rwb,VP->estimate().twb,VV->estimate(),VG->estimate(),VA->estimate(),H.block<15,15>(15,15));
     delete pFp->mpcpi;
     pFp->mpcpi = NULL;
