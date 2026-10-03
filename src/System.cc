@@ -429,7 +429,10 @@ Sophus::SE3f System::TrackMonocular(const cv::Mat &im, const double &timestamp, 
         exit(-1);
     }
 
-    cv::Mat imToFeed = im.clone();
+    // GrabImageMonocular converts colour in place (cvtColor(mImGray,mImGray,...)),
+    // so only those inputs need a private buffer. Mono8 is never written to, and
+    // the ORB pyramid copies out of it, so cloning it every frame is pure cost.
+    cv::Mat imToFeed = im.channels()==1 ? im : im.clone();
     if(settings_ && settings_->needToResize()){
         cv::Mat resizedIm;
         cv::resize(im,resizedIm,settings_->newImSize());
@@ -1596,9 +1599,17 @@ bool System::LoadAtlas(int type)
         mpAtlas->SetKeyFrameDababase(mpKeyFrameDatabase);
         mpAtlas->SetORBVocabulary(mpVocabulary);
         mpAtlas->PostLoad();
+        // Atlas::serialize never writes mpKeyFrameDB, so the inverted BoW index is empty
+        // after a load and relocalization can never match. Rebuild it (mBowVec is persisted).
+        size_t nIndexedKFs = 0;
         for (Map* pM : mpAtlas->GetAllMaps())
             for (KeyFrame* pKF : pM->GetAllKeyFrames())
-                if (pKF) pKF->SetFixedInBA(true);   // protect loaded backbone in local BA
+                if (pKF) {
+                    mpKeyFrameDatabase->add(pKF);
+                    pKF->SetFixedInBA(true);   // protect loaded backbone in local BA
+                    ++nIndexedKFs;
+                }
+        cout << "KeyFrameDatabase rebuilt after load: " << nIndexedKFs << " keyframes" << endl;
 
         return true;
     }

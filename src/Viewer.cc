@@ -161,6 +161,9 @@ bool Viewer::ParseViewerParamFile(cv::FileStorage &fSettings)
 
 void Viewer::Run()
 {
+    // Names the thread so `top -H` / `pidstat -t` can attribute CPU to this
+    // stage. See SetThreadName in TuningParams.h.
+    SetThreadName("orb_Viewer");
     mbFinished = false;
     mbStopped = false;
 

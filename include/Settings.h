@@ -29,8 +29,27 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string>
+#include <pthread.h>
+#include <cstring>
+
 
 namespace ORB_SLAM3 {
+
+    // Names the calling thread so OS tools that report per-thread CPU (top -H,
+// htop, pidstat -t, ps -L) can attribute load to a specific stage instead of
+// showing every thread as the parent process name.
+//
+// Without this, ORB-SLAM3's LocalMapping, LoopClosing and Viewer threads plus
+// the ROS node's tracking and executor threads all appear as the same truncated
+// process name, so two threads each sitting at ~90% of a core cannot be told
+// apart. Linux caps comm at 15 characters plus a NUL, hence the short names.
+// Failure is ignored: a name is diagnostics, never worth failing over.
+inline void SetThreadName(const char *name)
+{
+    if (std::strlen(name) > 15)
+        return;
+    pthread_setname_np(pthread_self(), name);
+}
 
     class System;
 

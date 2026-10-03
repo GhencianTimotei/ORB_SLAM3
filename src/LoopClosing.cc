@@ -89,6 +89,9 @@ void LoopClosing::SetLocalMapper(LocalMapping *pLocalMapper)
 
 void LoopClosing::Run()
 {
+    // Names the thread so `top -H` / `pidstat -t` can attribute CPU to this
+    // stage. See SetThreadName in TuningParams.h.
+    SetThreadName("orb_LoopClosing");
     mbFinished =false;
 
     while(1)
