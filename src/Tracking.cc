@@ -2305,14 +2305,27 @@ void Tracking::Track()
 
                     if(mCurrentFrame.mTimeStamp-mTimeStampLost>time_recently_lost)
                     {
+                        // RECENTLY_LOST has timed out — last-resort fallback: reset
+                        // the active map. The IMU calibration (bias/velocity) is
+                        // preserved by ResetFrameIMU() / the map reset logic so
+                        // a fresh map can start without a full new inertial init.
                         mState = LOST;
-                        Verbose::PrintMess("Track Lost...", Verbose::VERBOSITY_NORMAL);
+                        Verbose::PrintMess("Track Lost... resetting active map (last resort)", Verbose::VERBOSITY_NORMAL);
+                        if(!mbOnlyTracking)
+                            mpSystem->ResetActiveMap();
                         bOK = false;
                     }
                 }
                 else
                 {
                     bOK = Relocalization();
+                    if(mCurrentFrame.mTimeStamp-mTimeStampLost>time_recently_lost && !bOK)
+                    {
+                        mState = LOST;
+                        Verbose::PrintMess("Track Lost... resetting active map (last resort, no IMU init)", Verbose::VERBOSITY_NORMAL);
+                        if(!mbOnlyTracking)
+                            mpSystem->ResetActiveMap();
+                    }
                 }
             }
             else
@@ -2419,11 +2432,9 @@ void Tracking::Track()
             if (mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD)
             {
                 Verbose::PrintMess("Track lost for less than one second...", Verbose::VERBOSITY_NORMAL);
-                if(!mbOnlyTracking && (!pCurrentMap->isImuInitialized() || !pCurrentMap->GetIniertialBA2()))
-                {
-                    cout << "IMU is not or recently initialized. Reseting active map..." << endl;
-                    mpSystem->ResetActiveMap();
-                }
+                // Don't reset the map immediately on tracking loss — keep the
+                // map alive for relocalization. Reset is a last-resort fallback
+                // after RECENTLY_LOST times out (see RECENTLY_LOST block below).
 
                 mState=RECENTLY_LOST;
             }
