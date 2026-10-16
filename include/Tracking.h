@@ -87,6 +87,7 @@ public:
 
     // Use this function if you have deactivated local mapping and you only want to localize the camera.
     void InformOnlyTracking(const bool &flag);
+    void SeedKeyFrameAfterLocalization();
 
     void UpdateFrameIMU(const float s, const IMU::Bias &b, KeyFrame* pCurrentKeyFrame);
     KeyFrame* GetLastKeyFrame()
@@ -212,6 +213,8 @@ protected:
     bool PredictStateIMU();
 
     bool Relocalization();
+    bool RelocalizeKeepingPrediction();
+    bool RelocalizeWhileRecentlyLost();
 
     void UpdateLocalMap();
     void UpdateLocalPoints();
@@ -283,6 +286,11 @@ protected:
     //Local Map
     KeyFrame* mpReferenceKF;
     std::vector<KeyFrame*> mvpLocalKeyFrames;
+
+    // Mapping resumed on top of a loaded map (see SeedKeyFrameAfterLocalization):
+    // keyframes are only inserted where the local map has none close by.
+    bool mbExtendingLoadedMap = false;
+    bool IsViewCoveredByLocalKeyFrame();
     std::vector<MapPoint*> mvpLocalMapPoints;
     
     // System

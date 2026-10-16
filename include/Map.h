@@ -105,6 +105,10 @@ public:
     void SetBad();
     bool IsBad();
 
+    // Points first seen by a keyframe below this id belong to the loaded atlas and are
+    // held fixed by LocalInertialBA while it is being extended. 0 = nothing frozen.
+    long unsigned int mnFrozenBelowKFid = 0;
+
     void clear();
 
     int GetMapChangeIndex();

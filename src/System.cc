@@ -304,8 +304,9 @@ Sophus::SE3f System::TrackStereo(const cv::Mat &imLeft, const cv::Mat &imRight, 
         }
         if(mbDeactivateLocalizationMode)
         {
-            mpTracker->InformOnlyTracking(false);
+            // Release first: it deletes queued keyframes, including the one InformOnlyTracking(false) seeds.
             mpLocalMapper->Release();
+            mpTracker->InformOnlyTracking(false);
             mbDeactivateLocalizationMode = false;
         }
     }
@@ -379,8 +380,9 @@ Sophus::SE3f System::TrackRGBD(const cv::Mat &im, const cv::Mat &depthmap, const
         }
         if(mbDeactivateLocalizationMode)
         {
-            mpTracker->InformOnlyTracking(false);
+            // Release first: it deletes queued keyframes, including the one InformOnlyTracking(false) seeds.
             mpLocalMapper->Release();
+            mpTracker->InformOnlyTracking(false);
             mbDeactivateLocalizationMode = false;
         }
     }
@@ -457,8 +459,9 @@ Sophus::SE3f System::TrackMonocular(const cv::Mat &im, const double &timestamp, 
         }
         if(mbDeactivateLocalizationMode)
         {
-            mpTracker->InformOnlyTracking(false);
+            // Release first: it deletes queued keyframes, including the one InformOnlyTracking(false) seeds.
             mpLocalMapper->Release();
+            mpTracker->InformOnlyTracking(false);
             mbDeactivateLocalizationMode = false;
         }
     }

@@ -2198,8 +2198,10 @@ void Tracking::Track()
 
                 if (!bOK)
                 {
+                    // An IMU-initialized map can retry relocalization from RECENTLY_LOST instead.
                     if ( mCurrentFrame.mnId<=(mnLastRelocFrameId+mnFramesToResetIMU) &&
-                         (mSensor==System::IMU_MONOCULAR || mSensor==System::IMU_STEREO || mSensor == System::IMU_RGBD))
+                         (mSensor==System::IMU_MONOCULAR || mSensor==System::IMU_STEREO || mSensor == System::IMU_RGBD) &&
+                         !pCurrentMap->isImuInitialized())
                     {
                         mState = LOST;
                     }
@@ -2300,7 +2302,7 @@ void Tracking::Track()
                     // tracking within the bounded window.
                     bOK = PredictStateIMU();
 
-                    if(Relocalization())
+                    if(RelocalizeKeepingPrediction())
                         bOK = true;
 
                     if(mCurrentFrame.mTimeStamp-mTimeStampLost>time_recently_lost)
@@ -2413,6 +2415,9 @@ void Tracking::Track()
                 bOK = TrackLocalMap();
 
             }
+            if(!bOK && mState==RECENTLY_LOST && pCurrentMap->isImuInitialized() &&
+               (mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD))
+                bOK = RelocalizeWhileRecentlyLost();
             if(!bOK)
                 cout << "Fail to track local map!" << endl;
         }
@@ -2422,7 +2427,28 @@ void Tracking::Track()
             // a local map and therefore we do not perform TrackLocalMap(). Once the system relocalizes
             // the camera we will use the local map again.
             if(bOK && !mbVO)
+            {
+                // The wide post-relocalization local-map search can drown the PnP pose in
+                // wrong matches; keep the verified relocalization result instead of losing it.
+                const bool bRelocFrame = (mCurrentFrame.mnId == mnLastRelocFrameId);
+                Sophus::SE3f TcwReloc;
+                vector<MapPoint*> vpMPsReloc;
+                vector<bool> vbOutReloc;
+                if(bRelocFrame)
+                {
+                    TcwReloc = mCurrentFrame.GetPose();
+                    vpMPsReloc = mCurrentFrame.mvpMapPoints;
+                    vbOutReloc = mCurrentFrame.mvbOutlier;
+                }
                 bOK = TrackLocalMap();
+                if(!bOK && bRelocFrame)
+                {
+                    mCurrentFrame.SetPose(TcwReloc);
+                    mCurrentFrame.mvpMapPoints = vpMPsReloc;
+                    mCurrentFrame.mvbOutlier = vbOutReloc;
+                    bOK = true;
+                }
+            }
         }
 
         if(bOK)
@@ -2485,7 +2511,9 @@ void Tracking::Track()
         if(bOK || mState==RECENTLY_LOST)
         {
             // Update motion model
-            if(mLastFrame.isSet() && mCurrentFrame.isSet())
+            // A relocalized frame's predecessor carries a lost (dead-reckoned) pose; a velocity
+            // across that jump sends the next motion-model projection metres off.
+            if(mLastFrame.isSet() && mCurrentFrame.isSet() && mCurrentFrame.mnId != mnLastRelocFrameId)
             {
                 Sophus::SE3f LastTwc = mLastFrame.GetPose().inverse();
                 mVelocity = mCurrentFrame.GetPose() * LastTwc;
@@ -3280,7 +3308,10 @@ bool Tracking::TrackLocalMap()
         else
         {
             // if(!mbMapUpdated && mState == OK) //  && (mnMatchesInliers>30))
-            if(!mbMapUpdated) //  && (mnMatchesInliers>30))
+            // Localization mode has no last keyframe; always use the frame-to-frame filter.
+            // After the visual-only post-relocalization window the last frame has no prior to chain from.
+            const bool bPrevHasPrior = mCurrentFrame.mpPrevFrame && mCurrentFrame.mpPrevFrame->mpcpi;
+            if((!mbMapUpdated && bPrevHasPrior) || mbOnlyTracking || !mCurrentFrame.mpLastKeyFrame)
             {
                 Verbose::PrintMess("TLM: PoseInertialOptimizationLastFrame ", Verbose::VERBOSITY_DEBUG);
                 inliers = Optimizer::PoseInertialOptimizationLastFrame(&mCurrentFrame); // , !mpLastKeyFrame->GetMap()->GetIniertialBA1());
@@ -3362,6 +3393,25 @@ bool Tracking::TrackLocalMap()
     }
 }
 
+bool Tracking::IsViewCoveredByLocalKeyFrame()
+{
+    const float maxDist = 0.25f;                          // metres (map is IMU-scaled)
+    const float minCosAngle = std::cos(15.f * M_PI / 180.f);
+    const Eigen::Vector3f Oc = mCurrentFrame.GetCameraCenter();
+    const Eigen::Vector3f dirC = mCurrentFrame.GetPose().rotationMatrix().row(2).transpose();
+    for(KeyFrame* pKF : mvpLocalKeyFrames)
+    {
+        if(!pKF || pKF->isBad())
+            continue;
+        if((pKF->GetCameraCenter() - Oc).norm() > maxDist)
+            continue;
+        const Eigen::Vector3f dirK = pKF->GetPoseInverse().rotationMatrix().col(2);
+        if(dirK.dot(dirC) >= minCosAngle)
+            return true;
+    }
+    return false;
+}
+
 bool Tracking::NeedNewKeyFrame()
 {
     // Localization mode never inserts keyframes -- checked first because the inertial
@@ -3401,6 +3451,12 @@ bool Tracking::NeedNewKeyFrame()
     {
         return false;
     }
+
+    // Over an already-mapped area the inertial-mono rules below (inliers < 75, 0.5 s
+    // timer) fire nearly every frame and lay a duplicate point set over the loaded map.
+    const int nExtendWeakInliers = 30;
+    if(mbExtendingLoadedMap && mnMatchesInliers >= nExtendWeakInliers && IsViewCoveredByLocalKeyFrame())
+        return false;
 
     // Tracked MapPoints in the reference keyframe
     int nMinObs = 3;
@@ -4125,6 +4181,71 @@ bool Tracking::Relocalization()
 
 }
 
+// A failed Relocalization() leaves its last rejected PnP pose and matches on the frame.
+bool Tracking::RelocalizeKeepingPrediction()
+{
+    const bool bHadState = mCurrentFrame.isSet() && mCurrentFrame.HasVelocity();
+    Eigen::Matrix3f Rwb;
+    Eigen::Vector3f twb, Vwb;
+    if(bHadState)
+    {
+        Rwb = mCurrentFrame.GetImuRotation();
+        twb = mCurrentFrame.GetImuPosition();
+        Vwb = mCurrentFrame.GetVelocity();
+    }
+    // Weak local-map matches seed the next frame's local map, the IMU path's way back.
+    const vector<MapPoint*> vpMPs = mCurrentFrame.mvpMapPoints;
+    const vector<bool> vbOut = mCurrentFrame.mvbOutlier;
+
+    if(Relocalization())
+        return true;
+
+    if(bHadState)
+        mCurrentFrame.SetImuPoseVelocity(Rwb, twb, Vwb);
+    mCurrentFrame.mvpMapPoints = vpMPs;
+    mCurrentFrame.mvbOutlier = vbOut;
+    return false;
+}
+
+// Mapping-mode IMU recovery only searches the last keyframes around the dead-reckoned pose, so a
+// turn while blind never recovers before the timeout drops the map. Relocalize against the whole map.
+bool Tracking::RelocalizeWhileRecentlyLost()
+{
+    const bool bHadVelocity = mCurrentFrame.HasVelocity();
+    const Eigen::Vector3f Vwb = bHadVelocity ? mCurrentFrame.GetVelocity() : Eigen::Vector3f::Zero();
+    const IMU::Bias b = mCurrentFrame.mImuBias;
+
+    if(!RelocalizeKeepingPrediction())
+        return false;
+
+    // The matched keyframe's velocity dates from its creation; the IMU-propagated one is current.
+    if(bHadVelocity)
+        mCurrentFrame.SetVelocity(Vwb);
+    mCurrentFrame.mImuBias = b;
+    mCurrentFrame.mPredBias = b;
+    // ResetFrameIMU() would re-pose the frame by integrating from the pre-loss keyframe.
+    mbImuResetPending = false;
+
+    const Sophus::SE3f TcwReloc = mCurrentFrame.GetPose();
+    const vector<MapPoint*> vpMPsReloc = mCurrentFrame.mvpMapPoints;
+    const vector<bool> vbOutReloc = mCurrentFrame.mvbOutlier;
+    if(!TrackLocalMap())
+    {
+        mCurrentFrame.SetPose(TcwReloc);
+        mCurrentFrame.mvpMapPoints = vpMPsReloc;
+        mCurrentFrame.mvbOutlier = vbOutReloc;
+    }
+
+    // The preintegration from the pre-loss keyframe spans the dead-reckoned stretch: root a new chain.
+    KeyFrame* pPrevKF = mpLastKeyFrame;
+    mpLastKeyFrame = static_cast<KeyFrame*>(NULL);
+    CreateNewKeyFrame();
+    if(!mpLastKeyFrame)
+        mpLastKeyFrame = pPrevKF;
+    Verbose::PrintMess("Relocalized while recently lost, map kept", Verbose::VERBOSITY_QUIET);
+    return true;
+}
+
 void Tracking::Reset(bool bLocMap)
 {
     Verbose::PrintMess("System Reseting", Verbose::VERBOSITY_NORMAL);
@@ -4323,7 +4444,56 @@ void Tracking::ChangeCalibration(const string &strSettingPath)
 
 void Tracking::InformOnlyTracking(const bool &flag)
 {
+    const bool bResumeMapping = mbOnlyTracking && !flag;
+    const bool bEnterLocalization = !mbOnlyTracking && flag;
     mbOnlyTracking = flag;
+    if(bResumeMapping)
+        SeedKeyFrameAfterLocalization();
+    // The localization-mode IMU filter assumes no last keyframe; with one, ResetFrameIMU
+    // re-poses frames by integrating from it across the whole localization stretch.
+    if(bEnterLocalization)
+    {
+        mpLastKeyFrame = static_cast<KeyFrame*>(NULL);
+        mLastFrame.mpLastKeyFrame = static_cast<KeyFrame*>(NULL);
+        mCurrentFrame.mpLastKeyFrame = static_cast<KeyFrame*>(NULL);
+        mbExtendingLoadedMap = false;
+    }
+}
+
+// Localization mode creates no keyframes, so on return to mapping mpLastKeyFrame is NULL or
+// stale (its preintegration spans the whole localization stretch). Root a fresh inertial chain.
+void Tracking::SeedKeyFrameAfterLocalization()
+{
+    if(mSensor != System::IMU_MONOCULAR && mSensor != System::IMU_STEREO && mSensor != System::IMU_RGBD)
+        return;
+    if(mState != OK || !mpAtlas->isImuInitialized() ||
+       !mLastFrame.isSet() || !mLastFrame.HasVelocity())
+    {
+        Verbose::PrintMess("SeedKeyFrameAfterLocalization: skipped (no usable last frame)", Verbose::VERBOSITY_NORMAL);
+        return;
+    }
+    if(!mpLocalMapper->SetNotStop(true))
+        return;
+
+    KeyFrame* pKF = new KeyFrame(mLastFrame, mpAtlas->GetCurrentMap(), mpKeyFrameDB);
+    pKF->bImu = true;
+    pKF->SetNewBias(mLastFrame.mImuBias);
+    // mLastFrame keeps its old reference KF: UpdateLastFrame() re-poses it from
+    // mlRelativeFramePoses.back(), which was stored relative to that KF.
+    mpReferenceKF = pKF;
+    mpImuPreintegratedFromLastKF = new IMU::Preintegrated(pKF->GetImuBias(), pKF->mImuCalib);
+
+    Map* pMap = mpAtlas->GetCurrentMap();
+    if(pMap->mnFrozenBelowKFid == 0)
+        pMap->mnFrozenBelowKFid = pKF->mnId;
+
+    mpLocalMapper->InsertKeyFrame(pKF);
+    mpLocalMapper->SetNotStop(false);
+
+    mnLastKeyFrameId = mLastFrame.mnId;
+    mpLastKeyFrame = pKF;
+    mbExtendingLoadedMap = true;
+    Verbose::PrintMess("SeedKeyFrameAfterLocalization: new inertial chain rooted at KF " + to_string(pKF->mnId), Verbose::VERBOSITY_NORMAL);
 }
 
 void Tracking::UpdateFrameIMU(const float s, const IMU::Bias &b, KeyFrame* pCurrentKeyFrame)

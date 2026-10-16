@@ -2724,7 +2724,10 @@ void Optimizer::LocalInertialBA(KeyFrame *pKF, bool *pbStopFlag, Map *pMap, int&
 
         unsigned long id = pMP->mnId+iniMPid+1;
         vPoint->setId(id);
-        vPoint->setMarginalized(true);
+        if(pMP->mnFirstKFid < pMap->mnFrozenBelowKFid)
+            vPoint->setFixed(true);
+        else
+            vPoint->setMarginalized(true);
         optimizer.addVertex(vPoint);
         const map<KeyFrame*,tuple<int,int>> observations = pMP->GetObservations();
 
@@ -2913,6 +2916,9 @@ void Optimizer::LocalInertialBA(KeyFrame *pKF, bool *pbStopFlag, Map *pMap, int&
         {
             KeyFrame* pKFi = vToErase[i].first;
             MapPoint* pMPi = vToErase[i].second;
+            // Loaded-atlas keyframes are fixed here; their observations are not ours to prune.
+            if(pKFi->mnId < pMap->mnFrozenBelowKFid)
+                continue;
             pKFi->EraseMapPointMatch(pMPi);
             pMPi->EraseObservation(pKFi);
         }

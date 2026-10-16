@@ -709,10 +709,8 @@ void KeyFrameDatabase::DetectNBestCandidates(KeyFrame *pKF, vector<KeyFrame*> &v
     while(i < lAccScoreAndMatch.size() && (vpLoopCand.size() < nNumCandidates || vpMergeCand.size() < nNumCandidates))
     {
         KeyFrame* pKFi = it->second;
-        if(pKFi->isBad())
-            continue;
-
-        if(!spAlreadyAddedKF.count(pKFi))
+        // Upstream `continue`d here without advancing i/it: infinite loop on any bad candidate.
+        if(!pKFi->isBad() && !spAlreadyAddedKF.count(pKFi))
         {
             if(pKF->GetMap() == pKFi->GetMap() && vpLoopCand.size() < nNumCandidates)
             {

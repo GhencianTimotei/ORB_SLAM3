@@ -154,12 +154,17 @@ void LocalMapping::Run()
 
                     if(mbInertial && mpCurrentKeyFrame->GetMap()->isImuInitialized())
                     {
-                        float dist = (mpCurrentKeyFrame->mPrevKF->GetCameraCenter() - mpCurrentKeyFrame->GetCameraCenter()).norm() +
-                                (mpCurrentKeyFrame->mPrevKF->mPrevKF->GetCameraCenter() - mpCurrentKeyFrame->mPrevKF->GetCameraCenter()).norm();
+                        // A chain rooted after localization mode has <2 predecessors; skip the motion check.
+                        KeyFrame* pPrevKF = mpCurrentKeyFrame->mPrevKF;
+                        const bool bHaveChain = pPrevKF && pPrevKF->mPrevKF;
+                        float dist = 0.f;
+                        if(bHaveChain)
+                            dist = (pPrevKF->GetCameraCenter() - mpCurrentKeyFrame->GetCameraCenter()).norm() +
+                                (pPrevKF->mPrevKF->GetCameraCenter() - pPrevKF->GetCameraCenter()).norm();
 
                         if(dist>0.05)
-                            mTinit += mpCurrentKeyFrame->mTimeStamp - mpCurrentKeyFrame->mPrevKF->mTimeStamp;
-                        if(!mpCurrentKeyFrame->GetMap()->GetIniertialBA2())
+                            mTinit += mpCurrentKeyFrame->mTimeStamp - pPrevKF->mTimeStamp;
+                        if(bHaveChain && !mpCurrentKeyFrame->GetMap()->GetIniertialBA2())
                         {
                             if((mTinit<10.f) && (dist<0.02))
                             {
@@ -972,6 +977,10 @@ void LocalMapping::KeyFrameCulling()
         KeyFrame* pKF = *vit;
 
         if((pKF->mnId==pKF->GetMap()->GetInitKFid()) || pKF->isBad())
+            continue;
+        // Loaded-atlas keyframes look redundant once extension keyframes see their points,
+        // but they are the only ones from their viewpoint (relocalization anchors).
+        if(pKF->mnId < pKF->GetMap()->mnFrozenBelowKFid)
             continue;
         const vector<MapPoint*> vpMapPoints = pKF->GetMapPointMatches();
 
