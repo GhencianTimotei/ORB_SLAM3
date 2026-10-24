@@ -53,6 +53,7 @@
 
 
 #include <opencv2/core/core.hpp>
+#include <opencv2/core/utility.hpp>
 #include <opencv2/highgui/highgui.hpp>
 #include <opencv2/features2d/features2d.hpp>
 #include <opencv2/imgproc/imgproc.hpp>
@@ -784,7 +785,9 @@ namespace ORB_SLAM3
 
         const float W = 35;
 
-        for (int level = 0; level < nlevels; ++level)
+        // Levels are independent; extraction is the tracking thread's largest cost on the Pi.
+        cv::parallel_for_(cv::Range(0, nlevels), [&](const cv::Range& range) {
+        for (int level = range.start; level < range.end; ++level)
         {
             const int minBorderX = EDGE_THRESHOLD-3;
             const int minBorderY = minBorderX;
@@ -888,11 +891,10 @@ namespace ORB_SLAM3
                 keypoints[i].octave=level;
                 keypoints[i].size = scaledPatchSize;
             }
-        }
 
-        // compute orientations
-        for (int level = 0; level < nlevels; ++level)
-            computeOrientation(mvImagePyramid[level], allKeypoints[level], umax);
+            computeOrientation(mvImagePyramid[level], keypoints, umax);
+        }
+        });
     }
 
     void ORBextractor::ComputeKeyPointsOld(std::vector<std::vector<KeyPoint> > &allKeypoints)
@@ -1117,7 +1119,18 @@ namespace ORB_SLAM3
         //_keypoints.reserve(nkeypoints);
         _keypoints = vector<cv::KeyPoint>(nkeypoints);
 
-        int offset = 0;
+        vector<Mat> levelDescriptors(nlevels);
+        cv::parallel_for_(cv::Range(0, nlevels), [&](const cv::Range& range) {
+            for (int level = range.start; level < range.end; ++level)
+            {
+                if (allKeypoints[level].empty())
+                    continue;
+                Mat workingMat = mvImagePyramid[level].clone();
+                GaussianBlur(workingMat, workingMat, Size(7, 7), 2, 2, BORDER_REFLECT_101);
+                computeDescriptors(workingMat, allKeypoints[level], levelDescriptors[level], pattern);
+            }
+        });
+
         //Modified for speeding up stereo fisheye matching
         int monoIndex = 0, stereoIndex = nkeypoints-1;
         for (int level = 0; level < nlevels; ++level)
@@ -1128,16 +1141,7 @@ namespace ORB_SLAM3
             if(nkeypointsLevel==0)
                 continue;
 
-            // preprocess the resized image
-            Mat workingMat = mvImagePyramid[level].clone();
-            GaussianBlur(workingMat, workingMat, Size(7, 7), 2, 2, BORDER_REFLECT_101);
-
-            // Compute the descriptors
-            //Mat desc = descriptors.rowRange(offset, offset + nkeypointsLevel);
-            Mat desc = cv::Mat(nkeypointsLevel, 32, CV_8U);
-            computeDescriptors(workingMat, keypoints, desc, pattern);
-
-            offset += nkeypointsLevel;
+            const Mat& desc = levelDescriptors[level];
 
 
             float scale = mvScaleFactor[level]; //getScale(level, firstLevel, scaleFactor);

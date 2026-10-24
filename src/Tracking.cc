@@ -48,7 +48,8 @@ Tracking::Tracking(System *pSys, ORBVocabulary* pVoc, FrameDrawer *pFrameDrawer,
     mbReadyToInitializate(false), mpSystem(pSys), mpViewer(NULL), bStepByStep(false),
     mpFrameDrawer(pFrameDrawer), mpMapDrawer(pMapDrawer), mpAtlas(pAtlas), mnLastRelocFrameId(0), mnLastKeyFrameId(0), time_recently_lost(5.0),
     mnInitialFrameId(0), mbCreatedMap(false), mnFirstFrameId(0), mpCamera2(nullptr), mpLastKeyFrame(static_cast<KeyFrame*>(NULL)),
-    mpRelocKF(static_cast<KeyFrame*>(NULL)), mbImuResetPending(false)
+    mpRelocKF(static_cast<KeyFrame*>(NULL)), mbImuResetPending(false), mbRelocVelPending(false), mRelocVelT0(0.0),
+    mpRelocVelMap(static_cast<Map*>(NULL)), mnRelocVelBigChange(0)
 {
     // Load camera parameters from settings file
     if(settings){
@@ -2227,12 +2228,16 @@ void Tracking::Track()
                     bOK = true;
                     if((mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD))
                     {
-                        if(pCurrentMap->isImuInitialized())
+                        const double tLost = mCurrentFrame.mTimeStamp-mTimeStampLost;
+                        const double tKeepMap = std::max(0.0f, Tuning::lostKeepMapSeconds);
+                        // Past time_recently_lost the dead-reckoned pose is meaningless: skip it and
+                        // only try to relocalize into this map (RelocalizeWhileRecentlyLost below).
+                        if(pCurrentMap->isImuInitialized() && tLost<=time_recently_lost)
                             PredictStateIMU();
                         else
                             bOK = false;
 
-                        if (mCurrentFrame.mTimeStamp-mTimeStampLost>time_recently_lost)
+                        if (tLost>time_recently_lost+tKeepMap)
                         {
                             mState = LOST;
                             Verbose::PrintMess("Track Lost...", Verbose::VERBOSITY_NORMAL);
@@ -2458,9 +2463,14 @@ void Tracking::Track()
             if (mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_STEREO || mSensor == System::IMU_RGBD)
             {
                 Verbose::PrintMess("Track lost for less than one second...", Verbose::VERBOSITY_NORMAL);
-                // Don't reset the map immediately on tracking loss — keep the
-                // map alive for relocalization. Reset is a last-resort fallback
-                // after RECENTLY_LOST times out (see RECENTLY_LOST block below).
+                // Upstream: a map without settled gravity/scale is not worth keeping, re-init at once.
+                // A loaded atlas (localization / extending it) must never be reset here.
+                if(!mbOnlyTracking && !mbExtendingLoadedMap &&
+                   (!pCurrentMap->isImuInitialized() || !pCurrentMap->GetIniertialBA2()))
+                {
+                    cout << "IMU is not or recently initialized. Reseting active map..." << endl;
+                    mpSystem->ResetActiveMap();
+                }
 
                 mState=RECENTLY_LOST;
             }
@@ -2493,6 +2503,27 @@ void Tracking::Track()
                 }
                 else if(mCurrentFrame.mnId>(mnLastRelocFrameId+30))
                     mLastBias = mCurrentFrame.mImuBias;
+
+                // Last vision-only frame after RelocalizeWhileRecentlyLost: seed the IMU path with
+                // the velocity measured from the visual poses since recovery.
+                if(mbRelocVelPending && mCurrentFrame.mnId>=(mnLastRelocFrameId+mnFramesToResetIMU))
+                {
+                    const double dt = mCurrentFrame.mTimeStamp-mRelocVelT0;
+                    const Eigen::Vector3f v = (mCurrentFrame.GetImuPosition()-mRelocVelP0)/dt;
+                    const bool bSameFrame = pCurrentMap==mpRelocVelMap &&
+                                            pCurrentMap->GetLastBigChangeIdx()==mnRelocVelBigChange;
+                    if(bSameFrame && dt>0.2 && dt<3.0 && v.norm()<3.f)
+                    {
+                        mCurrentFrame.SetVelocity(v);
+                        // Leave it if LocalInertialBA has already estimated it (no longer the zero seed).
+                        if(mpLastKeyFrame && mpLastKeyFrame->mnFrameId>=mnLastRelocFrameId &&
+                           mpLastKeyFrame->GetVelocity().isZero())
+                            mpLastKeyFrame->SetVelocity(v);
+                    }
+                    else
+                        Verbose::PrintMess("Recovery velocity not measurable, keeping zero", Verbose::VERBOSITY_NORMAL);
+                    mbRelocVelPending = false;
+                }
             }
         }
 
@@ -2517,6 +2548,7 @@ void Tracking::Track()
             {
                 Sophus::SE3f LastTwc = mLastFrame.GetPose().inverse();
                 mVelocity = mCurrentFrame.GetPose() * LastTwc;
+                mVelocityDt = mCurrentFrame.mTimeStamp - mLastFrame.mTimeStamp;
                 mbVelocity = true;
             }
             else {
@@ -3184,7 +3216,12 @@ bool Tracking::TrackWithMotionModel()
     }
     else
     {
-        mCurrentFrame.SetPose(mVelocity * mLastFrame.GetPose());
+        // Constant velocity per second, not per frame: a skipped frame doubles the motion to predict.
+        Sophus::SE3f velocity = mVelocity;
+        const double ratio = mVelocityDt > 0.0 ? (mCurrentFrame.mTimeStamp - mLastFrame.mTimeStamp) / mVelocityDt : 1.0;
+        if(ratio > 0.0 && std::abs(ratio - 1.0) > 0.25)
+            velocity = Sophus::SE3f::exp(mVelocity.log() * static_cast<float>(std::min(ratio, 5.0)));
+        mCurrentFrame.SetPose(velocity * mLastFrame.GetPose());
     }
 
 
@@ -4211,30 +4248,34 @@ bool Tracking::RelocalizeKeepingPrediction()
 // turn while blind never recovers before the timeout drops the map. Relocalize against the whole map.
 bool Tracking::RelocalizeWhileRecentlyLost()
 {
-    const bool bHadVelocity = mCurrentFrame.HasVelocity();
-    const Eigen::Vector3f Vwb = bHadVelocity ? mCurrentFrame.GetVelocity() : Eigen::Vector3f::Zero();
     const IMU::Bias b = mCurrentFrame.mImuBias;
 
     if(!RelocalizeKeepingPrediction())
         return false;
 
-    // The matched keyframe's velocity dates from its creation; the IMU-propagated one is current.
-    if(bHadVelocity)
-        mCurrentFrame.SetVelocity(Vwb);
+    // Neither velocity is current: the matched keyframe's dates from its creation, and the
+    // dead-reckoned one is IMU drift (0.4-1.4 m/s after 2-4 s blind, bag 2026-10-16). Start
+    // from rest; the end of the vision-only window replaces it with the visual velocity.
+    mCurrentFrame.SetVelocity(Eigen::Vector3f::Zero());
     mCurrentFrame.mImuBias = b;
     mCurrentFrame.mPredBias = b;
     // ResetFrameIMU() would re-pose the frame by integrating from the pre-loss keyframe.
     mbImuResetPending = false;
 
+    // A PnP pose the local map does not confirm stays a guess: keyframing it seeds map points
+    // offset from the existing ones (duplicates, then drift and loop-closure jumps). Stay lost.
     const Sophus::SE3f TcwReloc = mCurrentFrame.GetPose();
-    const vector<MapPoint*> vpMPsReloc = mCurrentFrame.mvpMapPoints;
-    const vector<bool> vbOutReloc = mCurrentFrame.mvbOutlier;
     if(!TrackLocalMap())
     {
         mCurrentFrame.SetPose(TcwReloc);
-        mCurrentFrame.mvpMapPoints = vpMPsReloc;
-        mCurrentFrame.mvbOutlier = vbOutReloc;
+        Verbose::PrintMess("Relocalization while recently lost rejected by the local map", Verbose::VERBOSITY_QUIET);
+        return false;
     }
+    mbRelocVelPending = true;
+    mRelocVelT0 = mCurrentFrame.mTimeStamp;
+    mRelocVelP0 = mCurrentFrame.GetImuPosition();
+    mpRelocVelMap = mpAtlas->GetCurrentMap();
+    mnRelocVelBigChange = mpRelocVelMap->GetLastBigChangeIdx();
 
     // The preintegration from the pre-loss keyframe spans the dead-reckoned stretch: root a new chain.
     KeyFrame* pPrevKF = mpLastKeyFrame;
@@ -4296,6 +4337,7 @@ void Tracking::Reset(bool bLocMap)
     mlbLost.clear();
     mCurrentFrame = Frame();
     mnLastRelocFrameId = 0;
+    mbRelocVelPending = false;
     mLastFrame = Frame();
     mpReferenceKF = static_cast<KeyFrame*>(NULL);
     mpLastKeyFrame = static_cast<KeyFrame*>(NULL);
@@ -4383,6 +4425,7 @@ void Tracking::ResetActiveMap(bool bLocMap)
 
     mnInitialFrameId = mCurrentFrame.mnId;
     mnLastRelocFrameId = mCurrentFrame.mnId;
+    mbRelocVelPending = false;
 
     mCurrentFrame = Frame();
     mLastFrame = Frame();

@@ -261,6 +261,15 @@ protected:
     // mnLastRelocFrameId+mnFramesToResetIMU doesn't skip the reset for the rest of the run.
     bool mbImuResetPending;
 
+    // RelocalizeWhileRecentlyLost(): IMU position/time at recovery. Velocity is re-measured
+    // visually over the vision-only window instead of trusting the dead-reckoned one.
+    bool mbRelocVelPending;
+    double mRelocVelT0;
+    Eigen::Vector3f mRelocVelP0;
+    // P0 is only comparable while the map is the same and no loop/merge/VIBA has moved it.
+    Map* mpRelocVelMap;
+    int mnRelocVelBigChange;
+
     // In case of performing only localization, this flag is true when there are no matches to
     // points in the map. Still tracking will continue if there are enough matches with temporal points.
     // In that case we are doing visual odometry. The system will try to do relocalization to recover
@@ -350,6 +359,7 @@ protected:
     //Motion Model
     bool mbVelocity{false};
     Sophus::SE3f mVelocity;
+    double mVelocityDt{0.0}; // frame interval mVelocity spans; dropped frames make the next one longer
 
     //Color order (true RGB, false BGR, ignored if grayscale)
     bool mbRGB;

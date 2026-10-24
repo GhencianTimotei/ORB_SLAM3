@@ -12,6 +12,7 @@ namespace ORB_SLAM3
 // mentions none of these reproduces stock ORB-SLAM3 exactly.
 int   Tuning::minFramesBetweenKFs    = -1;
 int   Tuning::framesToResetIMU       = -1;
+float Tuning::lostKeepMapSeconds     = -1.0f;
 int   Tuning::localBAWindowKFs       = -1;
 int   Tuning::localBAIterations      = -1;
 int   Tuning::localBAWindowKFsLarge  = -1;
@@ -68,6 +69,7 @@ void Tuning::LoadFromSettings(const std::string &strSettingsFile)
 
     readInt(fs,   "Tracking.minFramesBetweenKFs",  minFramesBetweenKFs);
     readInt(fs,   "Tracking.framesToResetIMU",     framesToResetIMU);
+    readFloat(fs, "Tracking.lostKeepMapSeconds",   lostKeepMapSeconds);
     readInt(fs,   "LocalMapping.baWindowKFs",      localBAWindowKFs);
     readInt(fs,   "LocalMapping.baIterations",     localBAIterations);
     readInt(fs,   "LocalMapping.baWindowKFsLarge", localBAWindowKFsLarge);
@@ -98,6 +100,11 @@ void Tuning::Print()
         std::cout << "fps  (default)" << std::endl;
     else
         std::cout << framesToResetIMU << "  (override, upstream fps)" << std::endl;
+    std::cout << "  Tracking.lostKeepMapSeconds: ";
+    if (lostKeepMapSeconds < 0.0f)
+        std::cout << "0  (default)" << std::endl;
+    else
+        std::cout << lostKeepMapSeconds << "  (override, upstream 0)" << std::endl;
     showInt("LocalMapping.baWindowKFs",       localBAWindowKFs,      10);
     showInt("LocalMapping.baIterations",      localBAIterations,     10);
     showInt("LocalMapping.baWindowKFsLarge",  localBAWindowKFsLarge, 25);

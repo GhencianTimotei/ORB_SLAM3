@@ -67,6 +67,13 @@ public:
     // -1 = upstream (mMaxFrames).
     static int framesToResetIMU;
 
+    // Tracking.lostKeepMapSeconds: after RECENTLY_LOST's 5 s of IMU dead-reckoning,
+    // keep relocalizing into the IMU-initialised map this much longer before
+    // starting a new map (which needs VIBA again before it can merge back).
+    //
+    // -1 = upstream (0: new map immediately).
+    static float lostKeepMapSeconds;
+
     // ---- Local inertial bundle adjustment window ---------------------------
     // Optimizer::LocalInertialBA optimises the last Nd keyframes for opt_it
     // iterations. Upstream picks between two hardcoded pairs on `bLarge`:
