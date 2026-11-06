@@ -26,6 +26,7 @@
 #include <algorithm>
 #include <opencv2/core/core.hpp>
 #include <limits>
+#include <cstdint>
 
 #include "FeatureVector.h"
 #include "BowVector.h"
@@ -245,6 +246,13 @@ public:
    * @param filename
    */
   void saveToTextFile(const std::string &filename) const;  
+
+  /**
+   * Raw binary cache of the tree; loads ~10x faster than the text file.
+   * Descriptors are stored as F::L bytes, so this only fits byte descriptors (ORB).
+   */
+  bool loadFromBinaryFile(const std::string &filename);
+  bool saveToBinaryFile(const std::string &filename) const;
 
   /**
    * Saves the vocabulary into a file
@@ -1421,6 +1429,90 @@ bool TemplatedVocabulary<TDescriptor,F>::loadFromTextFile(const std::string &fil
 
     return true;
 
+}
+
+// --------------------------------------------------------------------------
+
+template<class TDescriptor, class F>
+bool TemplatedVocabulary<TDescriptor,F>::saveToBinaryFile(const std::string &filename) const
+{
+    std::ofstream f(filename.c_str(), std::ios::binary | std::ios::trunc);
+    if(!f.is_open())
+        return false;
+    const int32_t header[5] = {0x42425744, m_k, m_L, (int32_t)m_scoring, (int32_t)m_weighting};
+    const uint32_t n = (uint32_t)m_nodes.size();
+    f.write((const char*)header, sizeof(header));
+    f.write((const char*)&n, sizeof(n));
+    for(size_t i=1; i<m_nodes.size(); i++)
+    {
+        const Node& node = m_nodes[i];
+        const int32_t parent = node.parent;
+        const uint8_t leaf = node.isLeaf() ? 1 : 0;
+        const double weight = (double)node.weight;
+        f.write((const char*)&parent, sizeof(parent));
+        f.write((const char*)&leaf, sizeof(leaf));
+        f.write((const char*)node.descriptor.template ptr<unsigned char>(), F::L);
+        f.write((const char*)&weight, sizeof(weight));
+    }
+    f.flush();
+    return f.good();
+}
+
+template<class TDescriptor, class F>
+bool TemplatedVocabulary<TDescriptor,F>::loadFromBinaryFile(const std::string &filename)
+{
+    std::ifstream f(filename.c_str(), std::ios::binary);
+    if(!f.is_open())
+        return false;
+    int32_t header[5];
+    uint32_t n = 0;
+    f.read((char*)header, sizeof(header));
+    f.read((char*)&n, sizeof(n));
+    if(!f.good() || header[0] != 0x42425744 || n < 2)
+        return false;
+    m_k = header[1];
+    m_L = header[2];
+    if(m_k<0 || m_k>20 || m_L<1 || m_L>10 || header[3]<0 || header[3]>5 || header[4]<0 || header[4]>3)
+        return false;
+    m_scoring = (ScoringType)header[3];
+    m_weighting = (WeightingType)header[4];
+    createScoringObject();
+
+    m_words.clear();
+    m_nodes.clear();
+    m_nodes.reserve(n);
+    m_words.reserve(pow((double)m_k, (double)m_L + 1));
+    m_nodes.resize(1);
+    m_nodes[0].id = 0;
+    for(uint32_t i=1; i<n; i++)
+    {
+        int32_t parent;
+        uint8_t leaf;
+        double weight;
+        m_nodes.resize(i+1);
+        Node& node = m_nodes[i];
+        node.id = i;
+        f.read((char*)&parent, sizeof(parent));
+        f.read((char*)&leaf, sizeof(leaf));
+        node.descriptor.create(1, F::L, CV_8U);
+        f.read((char*)node.descriptor.template ptr<unsigned char>(), F::L);
+        f.read((char*)&weight, sizeof(weight));
+        if(!f.good() || parent < 0 || (uint32_t)parent >= i)
+            return false;
+        node.parent = parent;
+        node.weight = weight;
+        m_nodes[parent].children.push_back(i);
+        if(leaf)
+        {
+            node.word_id = m_words.size();
+            m_words.push_back(&node);
+        }
+        else
+        {
+            node.children.reserve(m_k);
+        }
+    }
+    return true;
 }
 
 // --------------------------------------------------------------------------

@@ -1580,6 +1580,7 @@ Sophus::SE3f Tracking::GrabImageRGBD(const cv::Mat &imRGB,const cv::Mat &imD, co
 
 Sophus::SE3f Tracking::GrabImageMonocular(const cv::Mat &im, const double &timestamp, string filename)
 {
+    TryResumeMapping();
     mImGray = im;
     if(mImGray.channels()==3)
     {
@@ -3011,6 +3012,7 @@ void Tracking::CreateInitialMapMonocular()
 void Tracking::CreateMapInAtlas()
 {
     mnLastInitFrameId = mCurrentFrame.mnId;
+    mbExtendingLoadedMap = false;
     mpAtlas->CreateNewMap();
     if (mSensor==System::IMU_STEREO || mSensor == System::IMU_MONOCULAR || mSensor == System::IMU_RGBD)
         mpAtlas->SetInertialSensor();
@@ -4489,6 +4491,13 @@ void Tracking::InformOnlyTracking(const bool &flag)
 {
     const bool bResumeMapping = mbOnlyTracking && !flag;
     const bool bEnterLocalization = !mbOnlyTracking && flag;
+    mbResumeMappingPending = false;
+    if(bResumeMapping && mSensor == System::IMU_MONOCULAR &&
+       (mbImuResetPending || mbRelocVelPending || (long)mLastFrame.mnId < (long)mnFirstImuFrameId + kResumeSettleFrames))
+    {
+        mbResumeMappingPending = true;
+        return;
+    }
     mbOnlyTracking = flag;
     if(bResumeMapping)
         SeedKeyFrameAfterLocalization();
@@ -4501,6 +4510,13 @@ void Tracking::InformOnlyTracking(const bool &flag)
         mCurrentFrame.mpLastKeyFrame = static_cast<KeyFrame*>(NULL);
         mbExtendingLoadedMap = false;
     }
+}
+
+// Seeding mid-window roots the new chain on a velocity the IMU filter has not estimated yet.
+void Tracking::TryResumeMapping()
+{
+    if(mbResumeMappingPending && mbOnlyTracking && mState == OK)
+        InformOnlyTracking(false);
 }
 
 // Localization mode creates no keyframes, so on return to mapping mpLastKeyFrame is NULL or

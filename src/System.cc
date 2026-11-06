@@ -18,6 +18,7 @@
 
 
 
+#include <sys/stat.h>
 #include "System.h"
 #include "Converter.h"
 #include "TuningParams.h"
@@ -36,6 +37,21 @@
 
 namespace ORB_SLAM3
 {
+
+// The 145 MB text vocabulary takes seconds to parse; keep a raw binary cache next to it.
+static bool LoadVocabularyCached(ORBVocabulary* voc, const string &strVocFile)
+{
+    const string binFile = strVocFile + ".bin";
+    struct stat txt, bin;
+    if(stat(strVocFile.c_str(), &txt) == 0 && stat(binFile.c_str(), &bin) == 0 &&
+       bin.st_mtime >= txt.st_mtime && voc->loadFromBinaryFile(binFile))
+        return true;
+    if(!voc->loadFromTextFile(strVocFile))
+        return false;
+    if(!voc->saveToBinaryFile(binFile + ".tmp") || rename((binFile + ".tmp").c_str(), binFile.c_str()) != 0)
+        cerr << "Vocabulary binary cache not written: " << binFile << endl;
+    return true;
+}
 
 Verbose::eLevel Verbose::th = Verbose::VERBOSITY_NORMAL;
 
@@ -123,7 +139,7 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
         cout << endl << "Loading ORB Vocabulary. This could take a while..." << endl;
 
         mpVocabulary = new ORBVocabulary();
-        bool bVocLoad = mpVocabulary->loadFromTextFile(strVocFile);
+        bool bVocLoad = LoadVocabularyCached(mpVocabulary, strVocFile);
         if(!bVocLoad)
         {
             cerr << "Wrong path to vocabulary. " << endl;
@@ -145,7 +161,7 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
         cout << endl << "Loading ORB Vocabulary. This could take a while..." << endl;
 
         mpVocabulary = new ORBVocabulary();
-        bool bVocLoad = mpVocabulary->loadFromTextFile(strVocFile);
+        bool bVocLoad = LoadVocabularyCached(mpVocabulary, strVocFile);
         if(!bVocLoad)
         {
             cerr << "Wrong path to vocabulary. " << endl;
