@@ -37,6 +37,8 @@
 #include <netdb.h>
 #include <poll.h>
 #include <sys/socket.h>
+#include <cstdint>
+#include <cstdlib>
 #include <sys/time.h>
 #include <sys/types.h>
 
@@ -52,6 +54,11 @@ Communicator::Communicator(std::string server_ip, std::string port, Atlas* map)
 
     map_ = map;
 
+    if(const char* join_env = std::getenv("COVINS_JOIN_MAP"); join_env && *join_env && std::atoi(join_env) >= 0) {
+        join_map_id_ = std::atoi(join_env);
+        join_mode_ = true;
+    }
+
     std::cout << "--> Connect to server" << std::endl;
     newfd_ = ConnectToServer(server_ip.c_str(),port);
     if(newfd_ <= 2){
@@ -59,12 +66,27 @@ Communicator::Communicator(std::string server_ip, std::string port, Atlas* map)
         connected_ = false;
         return;
     }
+
+    if(join_mode_) {
+        // Join request the server peeks for right after accept(): "JOIN" + int32 map id, little endian.
+        const int32_t id = join_map_id_;
+        uint8_t req[8] = {'J', 'O', 'I', 'N', uint8_t(id), uint8_t(id >> 8), uint8_t(id >> 16), uint8_t(id >> 24)};
+        if(send(newfd_, req, sizeof(req), MSG_NOSIGNAL) != static_cast<ssize_t>(sizeof(req))) {
+            std::cerr << "COVINS: JOIN request failed, COVINS off" << std::endl;
+            close(newfd_);
+            connected_ = false;
+            return;
+        }
+        std::cout << "COVINS: joining server map " << join_map_id_ << std::endl;
+    }
+
     connected_ = true;
     // A hung server would otherwise block send() forever; the timeout makes it fail and drop the link.
     const timeval send_timeout{kSendTimeoutS, 0};
     setsockopt(newfd_, SOL_SOCKET, SO_SNDTIMEO, &send_timeout, sizeof(send_timeout));
     std::cout << "newfd_: " << newfd_ << std::endl;
     std::cout << "--> Connected" << std::endl;
+    if(join_mode_) kf_id_offset_ = 0;  // loaded KFs hold the low ids, so new ids are never 0
 }
 
 // Same as the base class, but bounded by kConnectTimeoutMs instead of the kernel's multi-minute default.

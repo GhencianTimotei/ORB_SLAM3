@@ -104,6 +104,11 @@ class MapPoint
         ar & mfMinDistance;
         ar & mfMaxDistance;
 
+        if (version >= 1)
+        {
+            ar & mnServerId;
+            ar & mnServerClientId;
+        }
     }
 
 
@@ -167,6 +172,8 @@ public:
 public:
     long unsigned int mnId;
     static long unsigned int nNextId;
+    long int mnServerId = -1;  // COVINS server id pair, -1 = not from the server
+    long int mnServerClientId = -1;
     long int mnFirstKFid;
     long int mnFirstFrame;
     int nObs;
@@ -258,10 +265,15 @@ public:
     bool sent_once_ = false;
     void ConvertToMsg(covins::MsgLandmark &msg, KeyFrame* kf_ref, bool is_update, size_t client_id,
                       unsigned long kf_id_offset);
+    // Server id pair if the point came from a converted server map, else this agent's own id.
+    static covins::TypeDefs::idpair GetIdPair(const MapPoint* mp, size_t client_id);
 #endif
 
 };
 
 } //namespace ORB_SLAM
+
+// v1 adds the COVINS server ids; v0 atlases still load.
+BOOST_CLASS_VERSION(ORB_SLAM3::MapPoint, 1)
 
 #endif // MAPPOINT_H

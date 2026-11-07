@@ -72,6 +72,9 @@ public:
     // Returns false until a usable keyframe pose has been received from the server.
     auto GetCorrection(Correction &out) const                                           ->bool;
 
+    // True when the agent joined a pre-loaded server map (COVINS_JOIN_MAP set).
+    auto IsJoinMode() const                                                             ->bool { return join_mode_; }
+
 protected:
 
     // data handling
@@ -91,8 +94,10 @@ protected:
     std::mutex              mtx_kf_queue_;
     std::mutex              mtx_convert_;       // held while the Comm thread reads KFs/MPs
     bool                    stopped_ = false;   // guarded by mtx_convert_
-    long                    kf_id_offset_ = -1;   // ORB id of the first sent KF; the server sees it as 0
+    long                    kf_id_offset_ = -1;   // ORB id of the first sent KF; the server sees it as 0 (0 when joining)
     KeyFrame*               last_sent_kf_ = nullptr;
+    bool                    join_mode_ = false;   // COVINS_JOIN_MAP set: work inside a loaded server map
+    int                     join_map_id_ = -1;
 
     auto UpdateCorrection(const covins::MsgKeyframe &msg)                               ->void;
 

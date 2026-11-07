@@ -196,6 +196,12 @@ class KeyFrame
         ar & boost::serialization::make_array(mVw.data(), mVw.size());
         ar & boost::serialization::make_array(mOwb.data(), mOwb.size());
         ar & mbHasVelocity;
+
+        if (version >= 1)
+        {
+            ar & mnServerId;
+            ar & mnServerClientId;
+        }
     }
 
 public:
@@ -313,6 +319,8 @@ public:
 
     // The following variables are accesed from only 1 thread or never change (no mutex needed).
 public:
+    long int mnServerId = -1;  // COVINS server id pair, -1 = not from the server
+    long int mnServerClientId = -1;
 
     static long unsigned int nNextId;
     long unsigned int mnId;
@@ -562,10 +570,15 @@ public:
     bool ConvertToMsg(covins::MsgKeyframe &msg, KeyFrame* kf_ref, bool is_update, size_t client_id,
                       unsigned long kf_id_offset);
     void ConvertPreintegrationToMsg(covins::PreintegrationData &data);
+    // Server id pair if the KF came from a converted server map, else (mnId - offset, client_id).
+    static covins::TypeDefs::idpair GetIdPair(const KeyFrame* kf, unsigned long kf_id_offset, size_t client_id);
 #endif
 
 };
 
 } //namespace ORB_SLAM
+
+// v1 adds the COVINS server ids; v0 atlases still load.
+BOOST_CLASS_VERSION(ORB_SLAM3::KeyFrame, 1)
 
 #endif // KEYFRAME_H

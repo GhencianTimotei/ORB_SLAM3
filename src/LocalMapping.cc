@@ -1805,11 +1805,13 @@ void LocalMapping::SendCovinsKeyframes(KeyFrame* pKF)
     if(!comm_init_)
     {
         const bool bImuReady = !mbInertial || mpAtlas->isImuInitialized();
-        if(bImuReady && (int)mpAtlas->GetAllKeyFrames().size() >= covins_params::comm::start_sending_after_kf)
+        // In join mode the server map is already initialised; start sending on first IMU-ready KF.
+        const bool joinReady = comm_ && comm_->IsJoinMode();
+        if(bImuReady && (joinReady || (int)mpAtlas->GetAllKeyFrames().size() >= covins_params::comm::start_sending_after_kf))
         {
             comm_init_ = true;
             cout << "COVINS: start sending, " << kf_out_buffer_.size() << " KFs buffered, first id "
-                 << (*kf_out_buffer_.begin())->mnId << endl;
+                 << (*kf_out_buffer_.begin())->mnId << (joinReady ? " (join mode)" : "") << endl;
         }
         return;
     }

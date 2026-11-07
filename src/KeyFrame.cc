@@ -40,6 +40,12 @@ static covins::TypeDefs::TransformType ToTransform(const Sophus::SE3f &T)
     return T.matrix().cast<double>();
 }
 
+covins::TypeDefs::idpair KeyFrame::GetIdPair(const KeyFrame* kf, unsigned long kf_id_offset, size_t client_id) {
+    if(kf->mnServerId >= 0)
+        return {static_cast<size_t>(kf->mnServerId), static_cast<size_t>(kf->mnServerClientId)};
+    return {kf->mnId - kf_id_offset, client_id};
+}
+
 bool KeyFrame::ConvertToMsg(covins::MsgKeyframe &msg, KeyFrame *kf_ref, bool is_update, size_t client_id,
                             unsigned long kf_id_offset)
 {
@@ -135,24 +141,21 @@ bool KeyFrame::ConvertToMsg(covins::MsgKeyframe &msg, KeyFrame *kf_ref, bool is_
     while(pPrev && pPrev->isBad()) pPrev = pPrev->mPrevKF;
     KeyFrame* pNext = mNextKF;
     while(pNext && pNext->isBad()) pNext = pNext->mNextKF;
-    if(pPrev && pPrev->mnId >= kf_id_offset) {
-        msg.id_predecessor.first = pPrev->mnId - kf_id_offset;
-        msg.id_predecessor.second = client_id;
+    if(pPrev && (pPrev->mnServerId >= 0 || pPrev->mnId >= kf_id_offset)) {
+        msg.id_predecessor = GetIdPair(pPrev, kf_id_offset, client_id);
     }
-    if(pNext && pNext->mnId >= kf_id_offset) {
-        msg.id_successor.first = pNext->mnId - kf_id_offset;
-        msg.id_successor.second = client_id;
+    if(pNext && (pNext->mnServerId >= 0 || pNext->mnId >= kf_id_offset)) {
+        msg.id_successor = GetIdPair(pNext, kf_id_offset, client_id);
     }
-    if(kf_ref && kf_ref->mnId >= kf_id_offset) {
-        msg.id_reference.first = kf_ref->mnId - kf_id_offset;
-        msg.id_reference.second = client_id;
+    if(kf_ref && (kf_ref->mnServerId >= 0 || kf_ref->mnId >= kf_id_offset)) {
+        msg.id_reference = GetIdPair(kf_ref, kf_id_offset, client_id);
     }
     msg.T_sref_s = T_w_sref.inverse() * Tws;
 
     if(!is_update) {
         for(size_t indx = 0; indx < mvpMapPoints.size(); indx++) {
             const MapPoint* lm0 = mvpMapPoints[indx];
-            if(lm0) msg.landmarks[indx] = std::make_pair(lm0->mnId, client_id);
+            if(lm0) msg.landmarks[indx] = MapPoint::GetIdPair(lm0, client_id);
         }
     }
 

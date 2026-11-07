@@ -32,6 +32,12 @@ long unsigned int MapPoint::nNextId=0;
 mutex MapPoint::mGlobalMutex;
 
 #ifdef COVINS_MOD
+covins::TypeDefs::idpair MapPoint::GetIdPair(const MapPoint* mp, size_t client_id) {
+    if(mp->mnServerId >= 0)
+        return {static_cast<size_t>(mp->mnServerId), static_cast<size_t>(mp->mnServerClientId)};
+    return {mp->mnId, client_id};
+}
+
 void MapPoint::ConvertToMsg(covins::MsgLandmark &msg, KeyFrame *kf_ref, bool is_update, size_t client_id,
                             unsigned long kf_id_offset)
 {
@@ -40,24 +46,23 @@ void MapPoint::ConvertToMsg(covins::MsgLandmark &msg, KeyFrame *kf_ref, bool is_
 
     msg.is_update_msg = is_update;
 
-    msg.id.first = mnId;
-    msg.id.second = client_id;
+    msg.id = GetIdPair(this, client_id);
 
     if(!kf_ref) {
         std::cerr << "COVINS: LM " << mnId << ": no kf_ref given" << std::endl;
         return;
     }
 
-    msg.id_reference.first = kf_ref->mnId - kf_id_offset;
-    msg.id_reference.second = client_id;
+    msg.id_reference = KeyFrame::GetIdPair(kf_ref, kf_id_offset, client_id);
 
     const Eigen::Matrix4d T_sref_w = kf_ref->GetImuPose().matrix().cast<double>().inverse();
     msg.pos_ref = T_sref_w.block<3,3>(0,0) * mWorldPos.cast<double>() + T_sref_w.block<3,1>(0,3);
 
     if(!is_update) {
         for(const auto &obs : mObservations) {
-            if(obs.first != nullptr && obs.first->mnId >= kf_id_offset)
-                msg.observations.insert(std::make_pair(std::make_pair((size_t)(obs.first->mnId - kf_id_offset), client_id), std::get<0>(obs.second)));
+            KeyFrame* kf = obs.first;
+            if(kf != nullptr && (kf->mnServerId >= 0 || kf->mnId >= kf_id_offset))
+                msg.observations.insert(std::make_pair(KeyFrame::GetIdPair(kf, kf_id_offset, client_id), std::get<0>(obs.second)));
         }
     }
 }
