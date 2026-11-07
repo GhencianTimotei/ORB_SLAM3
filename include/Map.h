@@ -113,6 +113,10 @@ public:
 
     int GetMapChangeIndex();
     void IncreaseChangeIndex();
+    // Counts re-alignments of the map frame (IMU init / scale refinement), unlike IncreaseChangeIndex
+    // which local BA also bumps.
+    void IncreaseFrameChangeIdx();
+    int GetFrameChangeIdx();
     int GetLastMapChange();
     void SetLastMapChange(int currentChangeId);
 
@@ -181,6 +185,7 @@ protected:
     bool mbImuInitialized;
 
     int mnMapChange;
+    int mnFrameChangeIdx = 0;
     int mnMapChangeNotified;
 
     long unsigned int mnInitKFid;

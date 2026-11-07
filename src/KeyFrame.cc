@@ -21,10 +21,179 @@
 #include "ImuTypes.h"
 #include<mutex>
 
+#ifdef COVINS_MOD
+#include <covins/covins_base/msgs/msg_keyframe.hpp>
+#include <covins/covins_base/msgs/msg_landmark.hpp>
+#endif
+
 namespace ORB_SLAM3
 {
 
 long unsigned int KeyFrame::nNextId=0;
+
+#ifdef COVINS_MOD
+double KeyFrame::img_width = -1.0;
+double KeyFrame::img_height = -1.0;
+
+static covins::TypeDefs::TransformType ToTransform(const Sophus::SE3f &T)
+{
+    return T.matrix().cast<double>();
+}
+
+bool KeyFrame::ConvertToMsg(covins::MsgKeyframe &msg, KeyFrame *kf_ref, bool is_update, size_t client_id,
+                            unsigned long kf_id_offset)
+{
+    // Pose, velocity and calibration are read as members: the Get*() accessors would re-lock mMutexPose.
+    std::unique_lock<std::mutex> lock_conn(mMutexConnections);
+    std::unique_lock<std::mutex> lock_feat(mMutexFeatures);
+    std::unique_lock<std::mutex> lock_pose(mMutexPose);
+
+    if(kf_ref && kf_ref->mnId == mnId) {
+        std::cerr << "COVINS: KF " << mnId << " is its own reference, not sent" << std::endl;
+        return false;
+    }
+
+    if(!is_update && (img_width < 0 || img_height < 0)) {
+        std::cerr << "COVINS: invalid image dims " << img_width << "x" << img_height << ", KF " << mnId << " not sent" << std::endl;
+        return false;
+    }
+
+    msg.is_update_msg = is_update;
+
+    msg.id.first = mnId - kf_id_offset;
+    msg.id.second = client_id;
+    msg.timestamp = mTimeStamp;
+
+    if(!is_update) {
+        static std::once_flag warn_model;
+        std::call_once(warn_model, [this]() {
+            if(mpCamera && mpCamera->GetType() != GeometricCamera::CAM_PINHOLE)
+                std::cerr << "COVINS: camera is not PINHOLE, the server will assume one" << std::endl;
+            if(mDistCoef.total() != 4)
+                std::cerr << "COVINS: distortion has " << mDistCoef.total() << " coefficients, the server expects 4 (RADTAN)" << std::endl;
+        });
+
+        Eigen::VectorXd DistCoeffs = Eigen::VectorXd::Zero(4);
+        cv::Mat dist64;
+        mDistCoef.convertTo(dist64, CV_64F);
+        for(int i = 0; i < 4 && i < (int)dist64.total(); ++i)
+            DistCoeffs(i) = dist64.at<double>(i);
+
+        const Eigen::Matrix<float,6,1> cov = mImuCalib.Cov.diagonal();
+        const Eigen::Matrix<float,6,1> cov_walk = mImuCalib.CovWalk.diagonal();
+
+        const double dsigmaac = std::sqrt(cov(3));
+        const double dsigmagc = std::sqrt(cov(0));
+        const double dsigmaawc = std::sqrt(cov_walk(3));
+        const double dsigmagwc = std::sqrt(cov_walk(0));
+        const int irate = 200;
+
+        msg.calibration = covins::VICalibration(ToTransform(mImuCalib.mTbc),
+                                                covins::eCamModel::PINHOLE, covins::eDistortionModel::RADTAN, DistCoeffs,
+                                                img_width, img_height, fx, fy, cx, cy,
+                                                0.0, 0.0, dsigmaac, dsigmagc, 0.0, 0.0, dsigmaawc, dsigmagwc,
+                                                0.0, IMU::GRAVITY_VALUE, Eigen::Vector3d::Zero(), irate, 0.0, 0.0);
+
+        msg.img_dim_x_min = 0;
+        msg.img_dim_y_min = 0;
+        msg.img_dim_x_max = img_width;
+        msg.img_dim_y_max = img_height;
+
+        msg.keypoints_distorted.reserve(mvKeys.size());
+        msg.keypoints_aors.reserve(mvKeys.size());
+        for(const cv::KeyPoint &kp : mvKeys)
+        {
+            msg.keypoints_distorted.emplace_back(kp.pt.x, kp.pt.y);
+            msg.keypoints_aors.emplace_back(kp.angle, kp.octave, kp.response, kp.size);
+        }
+        msg.keypoints_undistorted.reserve(mvKeysUn.size());
+        for(const cv::KeyPoint &kp : mvKeysUn)
+            msg.keypoints_undistorted.emplace_back(kp.pt.x, kp.pt.y);
+        msg.descriptors = mDescriptors.clone();
+
+        ConvertPreintegrationToMsg(msg.preintegration);
+    }
+
+    const covins::TypeDefs::TransformType Tws = ToTransform(mTwc * mImuCalib.mTcb);
+
+    msg.T_s_c = ToTransform(mImuCalib.mTbc);
+
+    msg.velocity = Tws.block<3,3>(0,0).inverse() * mVw.cast<double>();
+    msg.bias_accel = Eigen::Vector3d(mImuBias.bax,mImuBias.bay,mImuBias.baz);
+    msg.bias_gyro = Eigen::Vector3d(mImuBias.bwx,mImuBias.bwy,mImuBias.bwz);
+    msg.lin_acc = msg.preintegration.acc;
+    msg.ang_vel = msg.preintegration.gyr;
+
+    covins::TypeDefs::TransformType T_w_sref = covins::TypeDefs::TransformType::Identity();
+    if(kf_ref) T_w_sref = ToTransform(kf_ref->GetImuPose());
+
+    if(!kf_ref && mnId != kf_id_offset)
+        std::cerr << "COVINS: KF " << mnId << " has no reference KF" << std::endl;
+
+    // Bad (e.g. discarded at IMU init) neighbours were never sent; link to the nearest live ones instead.
+    KeyFrame* pPrev = mPrevKF;
+    while(pPrev && pPrev->isBad()) pPrev = pPrev->mPrevKF;
+    KeyFrame* pNext = mNextKF;
+    while(pNext && pNext->isBad()) pNext = pNext->mNextKF;
+    if(pPrev && pPrev->mnId >= kf_id_offset) {
+        msg.id_predecessor.first = pPrev->mnId - kf_id_offset;
+        msg.id_predecessor.second = client_id;
+    }
+    if(pNext && pNext->mnId >= kf_id_offset) {
+        msg.id_successor.first = pNext->mnId - kf_id_offset;
+        msg.id_successor.second = client_id;
+    }
+    if(kf_ref && kf_ref->mnId >= kf_id_offset) {
+        msg.id_reference.first = kf_ref->mnId - kf_id_offset;
+        msg.id_reference.second = client_id;
+    }
+    msg.T_sref_s = T_w_sref.inverse() * Tws;
+
+    if(!is_update) {
+        for(size_t indx = 0; indx < mvpMapPoints.size(); indx++) {
+            const MapPoint* lm0 = mvpMapPoints[indx];
+            if(lm0) msg.landmarks[indx] = std::make_pair(lm0->mnId, client_id);
+        }
+    }
+
+    return true;
+}
+
+void KeyFrame::ConvertPreintegrationToMsg(covins::PreintegrationData &data)
+{
+    if(!mpImuPreintegrated) return;
+
+    const auto imu_measurements = mpImuPreintegrated->GetMeasurements();
+    const IMU::Bias bias = mpImuPreintegrated->GetUpdatedBias();
+    const size_t n = imu_measurements.size();
+
+    data.lin_bias_accel = Eigen::Vector3d(bias.bax,bias.bay,bias.baz);
+    data.lin_bias_gyro = Eigen::Vector3d(bias.bwx,bias.bwy,bias.bwz);
+
+    data.dt.resize(n);
+    data.lin_acc_x.resize(n);
+    data.lin_acc_y.resize(n);
+    data.lin_acc_z.resize(n);
+    data.ang_vel_x.resize(n);
+    data.ang_vel_y.resize(n);
+    data.ang_vel_z.resize(n);
+
+    for(size_t idx = 0; idx < n; ++idx) {
+        const auto &m = imu_measurements[idx];
+        if(idx == 0) {
+            data.acc = m.a.cast<double>();
+            data.gyr = m.w.cast<double>();
+        }
+        data.dt[idx] = m.t;
+        data.lin_acc_x[idx] = m.a.x();
+        data.lin_acc_y[idx] = m.a.y();
+        data.lin_acc_z[idx] = m.a.z();
+        data.ang_vel_x[idx] = m.w.x();
+        data.ang_vel_y[idx] = m.w.y();
+        data.ang_vel_z[idx] = m.w.z();
+    }
+}
+#endif
 
 KeyFrame::KeyFrame():
         mnFrameId(0),  mTimeStamp(0), mnGridCols(FRAME_GRID_COLS), mnGridRows(FRAME_GRID_ROWS),
@@ -93,6 +262,7 @@ KeyFrame::KeyFrame(Frame &F, Map *pMap, KeyFrameDatabase *pKFDB):
     SetPose(F.GetPose());
 
     mnOriginMapId = pMap->GetId();
+
 }
 
 void KeyFrame::ComputeBoW()

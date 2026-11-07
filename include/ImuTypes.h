@@ -247,7 +247,11 @@ private:
 
     std::vector<integrable> mvMeasurements;
 
-    std::mutex mMutex;
+    mutable std::mutex mMutex;
+
+public:
+    // Copy of the raw IMU measurements integrated so far (locked).
+    std::vector<integrable> GetMeasurements() const;
 };
 
 // Lie Algebra Functions

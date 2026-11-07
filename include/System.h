@@ -26,6 +26,7 @@
 #include<stdlib.h>
 #include<string>
 #include<thread>
+#include<memory>
 #include<opencv2/core/core.hpp>
 
 #include "Tracking.h"
@@ -79,6 +80,7 @@ class Tracking;
 class LocalMapping;
 class LoopClosing;
 class Settings;
+class Communicator;
 
 class System
 {
@@ -204,6 +206,14 @@ public:
     // For debugging
     double GetTimeFromIMUInit();
     bool isLost();
+
+    // COVINS: latest server correction T_W_A of this agent's map frame. False when COVINS is
+    // inactive (not built in, not configured, disconnected, or reset after sending).
+    bool GetCovinsCorrection(Eigen::Matrix4d &T_W_A, bool &shared_frame, unsigned long &seq,
+                             int &anchor_client);
+
+    // Bumps when IMU init / scale refinement re-align the active map's frame (local pose jumps).
+    int GetMapFrameChangeIdx();
     bool isFinished();
 
     void ChangeDataset();
@@ -259,6 +269,10 @@ private:
     std::thread* mptLocalMapping;
     std::thread* mptLoopClosing;
     std::thread* mptViewer;
+
+    // COVINS agent; declared unconditionally so System's layout does not depend on COVINS_MOD.
+    std::shared_ptr<Communicator> comm_;
+    std::thread* mptComm = nullptr;
 
     // Reset flag
     std::mutex mMutexReset;

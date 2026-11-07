@@ -21,11 +21,47 @@
 
 #include<mutex>
 
+#ifdef COVINS_MOD
+#include <covins/covins_base/msgs/msg_landmark.hpp>
+#endif
+
 namespace ORB_SLAM3
 {
 
 long unsigned int MapPoint::nNextId=0;
 mutex MapPoint::mGlobalMutex;
+
+#ifdef COVINS_MOD
+void MapPoint::ConvertToMsg(covins::MsgLandmark &msg, KeyFrame *kf_ref, bool is_update, size_t client_id,
+                            unsigned long kf_id_offset)
+{
+    std::unique_lock<std::mutex> loc_obs(mMutexFeatures);
+    std::unique_lock<std::mutex> lock_pos(mMutexPos);
+
+    msg.is_update_msg = is_update;
+
+    msg.id.first = mnId;
+    msg.id.second = client_id;
+
+    if(!kf_ref) {
+        std::cerr << "COVINS: LM " << mnId << ": no kf_ref given" << std::endl;
+        return;
+    }
+
+    msg.id_reference.first = kf_ref->mnId - kf_id_offset;
+    msg.id_reference.second = client_id;
+
+    const Eigen::Matrix4d T_sref_w = kf_ref->GetImuPose().matrix().cast<double>().inverse();
+    msg.pos_ref = T_sref_w.block<3,3>(0,0) * mWorldPos.cast<double>() + T_sref_w.block<3,1>(0,3);
+
+    if(!is_update) {
+        for(const auto &obs : mObservations) {
+            if(obs.first != nullptr && obs.first->mnId >= kf_id_offset)
+                msg.observations.insert(std::make_pair(std::make_pair((size_t)(obs.first->mnId - kf_id_offset), client_id), std::get<0>(obs.second)));
+        }
+    }
+}
+#endif
 
 MapPoint::MapPoint():
     mnFirstKFid(0), mnFirstFrame(0), nObs(0), mnTrackReferenceForFrame(0),

@@ -53,6 +53,40 @@ ${Pangolin_INCLUDE_DIRS}
 
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/lib)
 
+# COVINS collaborative-SLAM agent. Even when built in, it only runs if COVINS_COMM_CONFIG is set.
+option(ORB_SLAM3_COVINS "Build the COVINS agent (comm library + hooks)" OFF)
+set(COVINS_EXTRA_SOURCES "")
+if(ORB_SLAM3_COVINS)
+    set(COVINS_COMM_DIR ${PROJECT_SOURCE_DIR}/Thirdparty/covins_comm)
+
+    find_package(glog QUIET)
+    if(NOT TARGET glog::glog)
+        find_library(GLOG_LIBRARY glog REQUIRED)
+    endif()
+
+    add_library(covins_comm SHARED
+    ${COVINS_COMM_DIR}/src/covins_base/communicator_base.cpp
+    ${COVINS_COMM_DIR}/src/covins_base/config_comm.cpp
+    ${COVINS_COMM_DIR}/src/covins_base/utils_base.cpp
+    ${COVINS_COMM_DIR}/src/covins_base/msgs/msg_keyframe.cpp
+    ${COVINS_COMM_DIR}/src/covins_base/msgs/msg_landmark.cpp)
+    target_include_directories(covins_comm PUBLIC
+    ${COVINS_COMM_DIR}/include
+    ${COVINS_COMM_DIR}/include/covins
+    ${COVINS_COMM_DIR}/thirdparty
+    ${EIGEN3_INCLUDE_DIR}
+    ${OpenCV_INCLUDE_DIRS})
+    if(TARGET glog::glog)
+        target_link_libraries(covins_comm PUBLIC ${OpenCV_LIBS} pthread glog::glog)
+    else()
+        target_link_libraries(covins_comm PUBLIC ${OpenCV_LIBS} pthread ${GLOG_LIBRARY})
+    endif()
+
+    set(COVINS_EXTRA_SOURCES
+    src/comm/communicator.cpp
+    include/comm/communicator.hpp)
+endif()
+
 add_library(${PROJECT_NAME} SHARED
 src/System.cc
 src/Tracking.cc
@@ -113,7 +147,13 @@ include/TwoViewReconstruction.h
 include/SerializationUtils.h
 include/Config.h
 include/Settings.h
-include/TuningParams.h)
+include/TuningParams.h
+${COVINS_EXTRA_SOURCES})
+
+if(ORB_SLAM3_COVINS)
+    # Empty value matches the `#define COVINS_MOD` in typedefs_base.hpp (no redefinition warning).
+    target_compile_definitions(${PROJECT_NAME} PUBLIC COVINS_MOD=)
+endif()
 
 add_subdirectory(Thirdparty/g2o)
 
@@ -126,6 +166,10 @@ ${PROJECT_SOURCE_DIR}/Thirdparty/g2o/lib/libg2o.so
 -lboost_serialization
 -lcrypto
 )
+
+if(ORB_SLAM3_COVINS)
+    target_link_libraries(${PROJECT_NAME} covins_comm)
+endif()
 
 # If RealSense SDK is found the library is added and its examples compiled
 if(realsense2_FOUND)

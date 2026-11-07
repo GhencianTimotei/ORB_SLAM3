@@ -30,6 +30,10 @@
 #include <opencv2/core/core.hpp>
 #include <mutex>
 
+#ifdef COVINS_MOD
+#include <covins/covins_base/msgs/msg_landmark.hpp>
+#endif
+
 #include <boost/serialization/serialization.hpp>
 #include <boost/serialization/array.hpp>
 #include <boost/serialization/map.hpp>
@@ -248,6 +252,13 @@ protected:
      std::mutex mMutexPos;
      std::mutex mMutexFeatures;
      std::mutex mMutexMap;
+
+#ifdef COVINS_MOD
+public:
+    bool sent_once_ = false;
+    void ConvertToMsg(covins::MsgLandmark &msg, KeyFrame* kf_ref, bool is_update, size_t client_id,
+                      unsigned long kf_id_offset);
+#endif
 
 };
 

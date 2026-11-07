@@ -22,6 +22,10 @@
 #include "System.h"
 #include "Converter.h"
 #include "TuningParams.h"
+#ifdef COVINS_MOD
+#include "comm/communicator.hpp"
+#endif
+#include <chrono>
 #include <thread>
 #include <pangolin/pangolin.h>
 #include <iomanip>
@@ -256,6 +260,50 @@ System::System(const string &strVocFile, const string &strSettingsFile, const eS
 
     mpLoopCloser->SetTracker(mpTracker);
     mpLoopCloser->SetLocalMapper(mpLocalMapper);
+
+#ifdef COVINS_MOD
+    // COVINS runs only when COVINS_COMM_CONFIG points at a readable config; any failure leaves stock behaviour.
+    const char* covinsCfg = getenv("COVINS_COMM_CONFIG");
+    if(covinsCfg && *covinsCfg)
+    {
+        if(covins_params::conf_comm != covinsCfg)
+            cerr << "COVINS: " << covinsCfg << " is not readable, running without COVINS" << endl;
+        else
+        {
+            cout << ">>> COVINS: initialize communicator" << endl;
+            comm_.reset(new Communicator(covins_params::sys::server_ip, covins_params::sys::port, mpAtlas));
+            if(!comm_->IsConnected())
+            {
+                cerr << "COVINS: server unreachable, running without COVINS" << endl;
+                comm_.reset();
+            }
+            else
+            {
+                mptComm = new thread(&Communicator::Run, comm_);
+
+                const auto tWait = chrono::steady_clock::now();
+                while(comm_->GetClientId() < 0 && chrono::steady_clock::now() - tWait < chrono::seconds(10))
+                    usleep(1000);
+
+                if(comm_->GetClientId() < 0)
+                {
+                    cerr << "COVINS: no client id from the server within 10 s, running without COVINS" << endl;
+                    comm_->SetFinish();
+                    comm_->Disconnect();
+                    mptComm->join();
+                    delete mptComm;
+                    mptComm = nullptr;
+                    // comm_ stays alive: its detached receive thread still points into it.
+                }
+                else
+                {
+                    cout << ">>> COVINS: client id " << comm_->GetClientId() << endl;
+                    mpLocalMapper->SetComm(comm_);
+                }
+            }
+        }
+    }
+#endif
 
     //usleep(10*1000*1000);
 
@@ -618,6 +666,23 @@ void System::Shutdown()
         }
         usleep(5000);
     }
+
+#ifdef COVINS_MOD
+    if(mptComm)
+    {
+        comm_->SetFinish();
+        const auto tWait = chrono::steady_clock::now();
+        while(!comm_->IsFinished() && chrono::steady_clock::now() - tWait < chrono::seconds(5))
+            usleep(5000);
+        if(comm_->IsFinished())
+            mptComm->join();
+        else
+            mptComm->detach();
+        delete mptComm;
+        mptComm = nullptr;
+        comm_->Disconnect();  // wakes the detached receive thread before ~System frees comm_
+    }
+#endif
 
     if(!mStrSaveAtlasToFile.empty())
     {
@@ -1462,6 +1527,32 @@ double System::GetTimeFromIMUInit()
         return aux;
     else
         return 0.f;
+}
+
+int System::GetMapFrameChangeIdx()
+{
+    Map* pMap = mpAtlas->GetCurrentMap();
+    return pMap ? pMap->GetFrameChangeIdx() : 0;
+}
+
+bool System::GetCovinsCorrection(Eigen::Matrix4d &T_W_A, bool &shared_frame, unsigned long &seq,
+                                 int &anchor_client)
+{
+#ifdef COVINS_MOD
+    if(!comm_ || !mpLocalMapper->IsCommActive())
+        return false;
+    Communicator::Correction c;
+    if(!comm_->GetCorrection(c))
+        return false;
+    T_W_A = c.T_W_A;
+    shared_frame = c.shared_frame;
+    seq = c.seq;
+    anchor_client = c.anchor_client;
+    return true;
+#else
+    (void)T_W_A; (void)shared_frame; (void)seq; (void)anchor_client;
+    return false;
+#endif
 }
 
 bool System::isLost()

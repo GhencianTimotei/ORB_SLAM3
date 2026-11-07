@@ -30,6 +30,10 @@
 #include "GeometricTools.h"
 #include "TuningParams.h"
 
+#ifdef COVINS_MOD
+#include "comm/communicator.hpp"
+#endif
+
 #include <iostream>
 
 #include <mutex>
@@ -1597,6 +1601,11 @@ Sophus::SE3f Tracking::GrabImageMonocular(const cv::Mat &im, const double &times
             cvtColor(mImGray,mImGray,cv::COLOR_BGRA2GRAY);
     }
 
+#ifdef COVINS_MOD
+    KeyFrame::img_width = mImGray.cols;
+    KeyFrame::img_height = mImGray.rows;
+#endif
+
     if (mSensor == System::MONOCULAR)
     {
         if(mState==NOT_INITIALIZED || mState==NO_IMAGES_YET ||(lastID - initID) < mMaxFrames)
@@ -1999,8 +2008,19 @@ void Tracking::ResetFrameIMU()
 }
 
 
+// LocalMapping discards queued keyframes during IMU init (flagged bad, kept allocated); step back to a kept one.
+static KeyFrame* SkipDiscardedKeyFrames(KeyFrame* pKF)
+{
+    while(pKF && pKF->isBad() && pKF->mPrevKF)
+        pKF = pKF->mPrevKF;
+    return pKF;
+}
+
 void Tracking::Track()
 {
+    mpLastKeyFrame = SkipDiscardedKeyFrames(mpLastKeyFrame);
+    mpReferenceKF = SkipDiscardedKeyFrames(mpReferenceKF);
+    mLastFrame.mpLastKeyFrame = SkipDiscardedKeyFrames(mLastFrame.mpLastKeyFrame);
 
     if (bStepByStep)
     {
@@ -2045,7 +2065,11 @@ void Tracking::Track()
             }
             return;
         }
+#ifdef COVINS_MOD
+        else if(mCurrentFrame.mTimeStamp>mLastFrame.mTimeStamp+(mpLocalMapper->IsCommActive() ? covins_params::orb::imu_stamp_max_diff : 1.0))
+#else
         else if(mCurrentFrame.mTimeStamp>mLastFrame.mTimeStamp+1.0)
+#endif
         {
             // cout << mCurrentFrame.mTimeStamp << ", " << mLastFrame.mTimeStamp << endl;
             // cout << "id last: " << mLastFrame.mnId << "    id curr: " << mCurrentFrame.mnId << endl;
@@ -3011,6 +3035,9 @@ void Tracking::CreateInitialMapMonocular()
 
 void Tracking::CreateMapInAtlas()
 {
+#ifdef COVINS_MOD
+    mpLocalMapper->CovinsOnMapReset();
+#endif
     mnLastInitFrameId = mCurrentFrame.mnId;
     mbExtendingLoadedMap = false;
     mpAtlas->CreateNewMap();
@@ -3634,6 +3661,7 @@ void Tracking::CreateNewKeyFrame()
     mpReferenceKF = pKF;
     mCurrentFrame.mpReferenceKF = pKF;
 
+    mpLastKeyFrame = SkipDiscardedKeyFrames(mpLastKeyFrame);
     if(mpLastKeyFrame)
     {
         pKF->mPrevKF = mpLastKeyFrame;
@@ -4291,6 +4319,9 @@ bool Tracking::RelocalizeWhileRecentlyLost()
 
 void Tracking::Reset(bool bLocMap)
 {
+#ifdef COVINS_MOD
+    mpLocalMapper->CovinsOnMapReset();
+#endif
     Verbose::PrintMess("System Reseting", Verbose::VERBOSITY_NORMAL);
 
     if(mpViewer)
@@ -4353,6 +4384,9 @@ void Tracking::Reset(bool bLocMap)
 
 void Tracking::ResetActiveMap(bool bLocMap)
 {
+#ifdef COVINS_MOD
+    mpLocalMapper->CovinsOnMapReset();
+#endif
     Verbose::PrintMess("Active map Reseting", Verbose::VERBOSITY_NORMAL);
     if(mpViewer)
     {

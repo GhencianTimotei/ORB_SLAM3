@@ -63,6 +63,11 @@ public:
 
     void InsertKeyFrame(KeyFrame *pKF);
 
+#ifdef COVINS_MOD
+    // With COVINS the server closes loops; keyframes still go into the BoW database for relocalization.
+    void AddKeyFrameToDatabase(KeyFrame *pKF) { mpKeyFrameDB->add(pKF); }
+#endif
+
     void RequestReset();
     void RequestResetActiveMap(Map* pMap);
 

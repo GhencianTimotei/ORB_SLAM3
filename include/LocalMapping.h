@@ -29,6 +29,12 @@
 
 #include <mutex>
 
+#ifdef COVINS_MOD
+#include <atomic>
+#include <memory>
+#include <set>
+#endif
+
 
 namespace ORB_SLAM3
 {
@@ -37,6 +43,9 @@ class System;
 class Tracking;
 class LoopClosing;
 class Atlas;
+#ifdef COVINS_MOD
+class Communicator;
+#endif
 
 class LocalMapping
 {
@@ -162,6 +171,8 @@ protected:
     Tracking* mpTracker;
 
     std::list<KeyFrame*> mlNewKeyFrames;
+    std::vector<KeyFrame*> mvpDiscardedKFs;
+    void DiscardQueuedKeyFrames();
 
     KeyFrame* mpCurrentKeyFrame;
 
@@ -210,6 +221,30 @@ protected:
 
     //DEBUG
     ofstream f_lm;
+
+#ifdef COVINS_MOD
+public:
+    // A null comm means COVINS is inactive and local mapping behaves as stock ORB-SLAM3.
+    void SetComm(std::shared_ptr<Communicator> comm) { comm_ = comm; comm_active_ = (comm != nullptr); }
+    bool IsCommActive() const { return comm_active_; }
+    bool IsCommInitialized() const { return comm_init_; }
+
+    // Tracking calls this before it resets or replaces the map.
+    void CovinsOnMapReset();
+
+protected:
+    void DisableComm(const char* reason);
+    void ClearCovinsBuffer();
+    void QueueCovinsUpdates();
+    void SendCovinsKeyframes(KeyFrame* pKF);
+    void FlushCovinsKeyframes();
+
+    std::shared_ptr<Communicator> comm_;
+    std::atomic<bool> comm_active_{false};
+    std::atomic<bool> comm_init_{false};
+    std::mutex mMutexCommBuffer;
+    std::set<KeyFrame*,KeyFrame::cmp_by_id> kf_out_buffer_;
+#endif
 
     };
 

@@ -38,6 +38,12 @@
 #include <boost/serialization/vector.hpp>
 #include <boost/serialization/map.hpp>
 
+#ifdef COVINS_MOD
+#include <covins/covins_base/typedefs_base.hpp>
+
+namespace covins { struct PreintegrationData; }
+#endif
+
 
 namespace ORB_SLAM3
 {
@@ -540,6 +546,23 @@ public:
         cout << "Point distribution in KeyFrame: left-> " << left << " --- right-> " << right << endl;
     }
 
+#ifdef COVINS_MOD
+    // COVINS members stay at the end of the class so a build without COVINS_MOD sees the same offsets.
+    struct cmp_by_id {
+        bool operator()(const KeyFrame* a, const KeyFrame* b) const { return a->mnId < b->mnId; }
+    };
+
+    static double img_width;
+    static double img_height;
+
+    bool sent_once_ = false;
+
+    // Returns false (msg incomplete) when the image size is not known yet.
+    // kf_id_offset: id of this agent's first sent KF; the server requires every client's KF ids to start at 0.
+    bool ConvertToMsg(covins::MsgKeyframe &msg, KeyFrame* kf_ref, bool is_update, size_t client_id,
+                      unsigned long kf_id_offset);
+    void ConvertPreintegrationToMsg(covins::PreintegrationData &data);
+#endif
 
 };
 

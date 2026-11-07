@@ -343,6 +343,18 @@ unsigned int Map::GetLowerKFID()
     return 0;
 }
 
+void Map::IncreaseFrameChangeIdx()
+{
+    unique_lock<mutex> lock(mMutexMap);
+    mnFrameChangeIdx++;
+}
+
+int Map::GetFrameChangeIdx()
+{
+    unique_lock<mutex> lock(mMutexMap);
+    return mnFrameChangeIdx;
+}
+
 int Map::GetMapChangeIndex()
 {
     unique_lock<mutex> lock(mMutexMap);

@@ -25,6 +25,10 @@
 #include "GeometricTools.h"
 #include "TuningParams.h"
 
+#ifdef COVINS_MOD
+#include "comm/communicator.hpp"
+#endif
+
 #include<mutex>
 #include<chrono>
 #include<algorithm>
@@ -179,11 +183,17 @@ void LocalMapping::Run()
                         bool bLarge = ((mpTracker->GetMatchesInliers()>75)&&mbMonocular)||((mpTracker->GetMatchesInliers()>100)&&!mbMonocular);
                         Optimizer::LocalInertialBA(mpCurrentKeyFrame, &mbAbortBA, mpCurrentKeyFrame->GetMap(),num_FixedKF_BA,num_OptKF_BA,num_MPs_BA,num_edges_BA, bLarge, !mpCurrentKeyFrame->GetMap()->GetIniertialBA2());
                         b_doneLBA = true;
+#ifdef COVINS_MOD
+                        QueueCovinsUpdates();
+#endif
                     }
                     else
                     {
                         Optimizer::LocalBundleAdjustment(mpCurrentKeyFrame,&mbAbortBA, mpCurrentKeyFrame->GetMap(),num_FixedKF_BA,num_OptKF_BA,num_MPs_BA,num_edges_BA);
                         b_doneLBA = true;
+#ifdef COVINS_MOD
+                        QueueCovinsUpdates();
+#endif
                     }
 
                 }
@@ -220,6 +230,10 @@ void LocalMapping::Run()
 
 
                 // Check redundant local Keyframes
+#ifdef COVINS_MOD
+                // The server cannot handle keyframes deleted after they were sent.
+                if(!comm_active_)
+#endif
                 KeyFrameCulling();
                 msCulling = stageLap();
 
@@ -282,6 +296,14 @@ void LocalMapping::Run()
 
             ReportStageTimes(msKFInsert, msMPCreate, msSearch, msLBA, msCulling);
 
+#ifdef COVINS_MOD
+            if(comm_active_)
+            {
+                mpLoopCloser->AddKeyFrameToDatabase(mpCurrentKeyFrame);
+                SendCovinsKeyframes(mpCurrentKeyFrame);
+            }
+            else
+#endif
             mpLoopCloser->InsertKeyFrame(mpCurrentKeyFrame);
 
 #ifdef REGISTER_TIMES
@@ -313,6 +335,10 @@ void LocalMapping::Run()
         usleep(3000);
     }
 
+#ifdef COVINS_MOD
+    FlushCovinsKeyframes();
+#endif
+
     SetFinish();
 }
 
@@ -337,6 +363,14 @@ void LocalMapping::ProcessNewKeyFrame()
         mpCurrentKeyFrame = mlNewKeyFrames.front();
         mlNewKeyFrames.pop_front();
     }
+#ifdef COVINS_MOD
+    // InitializeIMU/ScaleRefinement drain the queue through here, skipping the end-of-Run send hook.
+    if(comm_active_)
+    {
+        unique_lock<mutex> lockComm(mMutexCommBuffer);
+        kf_out_buffer_.insert(mpCurrentKeyFrame);
+    }
+#endif
 
     // Compute Bags of Words structures
     mpCurrentKeyFrame->ComputeBoW();
@@ -1158,6 +1192,10 @@ void LocalMapping::ResetIfRequested()
 
             mIdxInit=0;
 
+#ifdef COVINS_MOD
+            ClearCovinsBuffer();
+#endif
+
             cout << "LM: End reseting Local Mapping..." << endl;
         }
 
@@ -1172,6 +1210,10 @@ void LocalMapping::ResetIfRequested()
             mbNotBA2 = true;
             mbNotBA1 = true;
             mbBadImu=false;
+
+#ifdef COVINS_MOD
+            ClearCovinsBuffer();
+#endif
 
             mbResetRequested = false;
             mbResetRequestedActiveMap = false;
@@ -1571,17 +1613,13 @@ void LocalMapping::InitializeIMU(float priorG, float priorA, bool bFIBA)
     mnKFs=vpKF.size();
     mIdxInit++;
 
-    for(list<KeyFrame*>::iterator lit = mlNewKeyFrames.begin(), lend=mlNewKeyFrames.end(); lit!=lend; lit++)
-    {
-        (*lit)->SetBadFlag();
-        delete *lit;
-    }
-    mlNewKeyFrames.clear();
+    DiscardQueuedKeyFrames();
 
     mpTracker->mState=Tracking::OK;
     bInitializing = false;
 
     mpCurrentKeyFrame->GetMap()->IncreaseChangeIndex();
+    mpCurrentKeyFrame->GetMap()->IncreaseFrameChangeIdx();
 
     return;
 }
@@ -1640,22 +1678,35 @@ void LocalMapping::ScaleRefinement()
     }
     std::chrono::steady_clock::time_point t3 = std::chrono::steady_clock::now();
 
-    for(list<KeyFrame*>::iterator lit = mlNewKeyFrames.begin(), lend=mlNewKeyFrames.end(); lit!=lend; lit++)
-    {
-        (*lit)->SetBadFlag();
-        delete *lit;
-    }
-    mlNewKeyFrames.clear();
+    DiscardQueuedKeyFrames();
 
     double t_inertial_only = std::chrono::duration_cast<std::chrono::duration<double> >(t1 - t0).count();
 
     // To perform pose-inertial opt w.r.t. last keyframe
     mpCurrentKeyFrame->GetMap()->IncreaseChangeIndex();
+    mpCurrentKeyFrame->GetMap()->IncreaseFrameChangeIdx();
 
     return;
 }
 
 
+
+void LocalMapping::DiscardQueuedKeyFrames()
+{
+    // Tracking can still hold these as last/reference KF, so they are flagged bad but never freed.
+    unique_lock<mutex> lock(mMutexNewKFs);
+    if(!mlNewKeyFrames.empty())
+        cout << "IMU init: discarding " << mlNewKeyFrames.size() << " queued KFs (first id " << mlNewKeyFrames.front()->mnId << ")" << endl;
+    for(KeyFrame* pKF : mlNewKeyFrames)
+    {
+        pKF->SetBadFlag();
+        mvpDiscardedKFs.push_back(pKF);
+    }
+    mlNewKeyFrames.clear();
+
+    if(mpCurrentKeyFrame && mpCurrentKeyFrame->mNextKF && mpCurrentKeyFrame->mNextKF->isBad())
+        mpCurrentKeyFrame->mNextKF = nullptr;
+}
 
 bool LocalMapping::IsInitializing()
 {
@@ -1678,5 +1729,112 @@ KeyFrame* LocalMapping::GetCurrKF()
 {
     return mpCurrentKeyFrame;
 }
+
+#ifdef COVINS_MOD
+static const bool kCovinsDebug = getenv("COVINS_DEBUG") != nullptr;
+// Unsent KFs beyond this mean the link cannot keep up; culling is off meanwhile, so the map would only grow.
+static constexpr size_t kMaxCommBacklog = 200;
+
+void LocalMapping::ClearCovinsBuffer()
+{
+    unique_lock<mutex> lock(mMutexCommBuffer);
+    if(kCovinsDebug && !kf_out_buffer_.empty())
+        cout << "COVINS_DEBUG reset clears " << kf_out_buffer_.size() << " buffered KFs" << endl;
+    kf_out_buffer_.clear();
+}
+
+void LocalMapping::DisableComm(const char* reason)
+{
+    if(comm_active_.exchange(false))
+    {
+        cerr << "COVINS: ERROR " << reason << ". Sending to the server stopped for good." << endl;
+        ClearCovinsBuffer();
+    }
+    // Unconditional: another thread may have won the exchange and still be inside Stop().
+    comm_->Stop();
+}
+
+void LocalMapping::CovinsOnMapReset()
+{
+    if(!comm_)
+        return;
+    if(comm_init_ || !comm_active_)
+        DisableComm("map reset after keyframes were sent, the server rejects reused keyframe ids");
+    else
+        ClearCovinsBuffer();
+}
+
+void LocalMapping::QueueCovinsUpdates()
+{
+    if(!comm_active_ || !comm_init_ || !covins_params::comm::send_updates)
+        return;
+
+    const vector<KeyFrame*> vpKFs = mpCurrentKeyFrame->GetVectorCovisibleKeyFrames();
+    unique_lock<mutex> lock(mMutexCommBuffer);
+    int n = 0;
+    for(KeyFrame* pKF : vpKFs)
+    {
+        if(n >= covins_params::comm::update_window_size)
+            break;
+        if(pKF->isBad())
+            continue;
+        kf_out_buffer_.insert(pKF);
+        n++;
+    }
+}
+
+void LocalMapping::SendCovinsKeyframes(KeyFrame* pKF)
+{
+    if(comm_->ShallFinish())
+    {
+        DisableComm("lost the connection to the server");
+        return;
+    }
+    if(comm_init_ && comm_->QueuedKeyframes() > kMaxCommBacklog)
+    {
+        DisableComm("the server link cannot keep up");
+        return;
+    }
+
+    unique_lock<mutex> lock(mMutexCommBuffer);
+    kf_out_buffer_.insert(pKF);
+    if(kCovinsDebug)
+        cout << "COVINS_DEBUG lm KF " << pKF->mnId << " buffer " << kf_out_buffer_.size()
+             << " lowest " << (*kf_out_buffer_.begin())->mnId << endl;
+
+    if(!comm_init_)
+    {
+        const bool bImuReady = !mbInertial || mpAtlas->isImuInitialized();
+        if(bImuReady && (int)mpAtlas->GetAllKeyFrames().size() >= covins_params::comm::start_sending_after_kf)
+        {
+            comm_init_ = true;
+            cout << "COVINS: start sending, " << kf_out_buffer_.size() << " KFs buffered, first id "
+                 << (*kf_out_buffer_.begin())->mnId << endl;
+        }
+        return;
+    }
+
+    // Holding back the newest keyframes lets local BA settle them before they are sent.
+    while((int)kf_out_buffer_.size() > covins_params::comm::kf_buffer_withold)
+    {
+        KeyFrame* pSend = *kf_out_buffer_.begin();
+        kf_out_buffer_.erase(kf_out_buffer_.begin());
+        comm_->PassKfToComm(pSend);
+    }
+}
+
+void LocalMapping::FlushCovinsKeyframes()
+{
+    if(!comm_active_)
+        return;
+    unique_lock<mutex> lock(mMutexCommBuffer);
+    if(comm_init_)
+    {
+        for(KeyFrame* pSend : kf_out_buffer_)
+            comm_->PassKfToComm(pSend);
+    }
+    kf_out_buffer_.clear();
+}
+#endif
 
 } //namespace ORB_SLAM

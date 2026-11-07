@@ -273,6 +273,12 @@ void Preintegrated::SetNewBias(const Bias &bu_)
     db(5) = bu_.baz-b.baz;
 }
 
+auto Preintegrated::GetMeasurements() const -> std::vector<integrable>
+{
+    std::unique_lock<std::mutex> lock(mMutex);
+    return mvMeasurements;
+}
+
 IMU::Bias Preintegrated::GetDeltaBias(const Bias &b_)
 {
     std::unique_lock<std::mutex> lock(mMutex);
