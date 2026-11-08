@@ -3237,10 +3237,9 @@ bool Tracking::TrackWithMotionModel()
     // Create "visual odometry" points if in Localization Mode
     UpdateLastFrame();
 
-    if (mpAtlas->isImuInitialized() && (mCurrentFrame.mnId>mnLastRelocFrameId+mnFramesToResetIMU))
+    // A failed prediction (no IMU data for this frame) leaves the pose unset: fall back to constant velocity.
+    if (mpAtlas->isImuInitialized() && (mCurrentFrame.mnId>mnLastRelocFrameId+mnFramesToResetIMU) && PredictStateIMU())
     {
-        // Predict state with IMU if it is initialized and it doesnt need reset
-        PredictStateIMU();
         return true;
     }
     else
@@ -3366,7 +3365,7 @@ bool Tracking::TrackLocalMap()
         Optimizer::PoseOptimization(&mCurrentFrame);
     else
     {
-        if(mCurrentFrame.mnId<=mnLastRelocFrameId+mnFramesToResetIMU)
+        if(mCurrentFrame.mnId<=mnLastRelocFrameId+mnFramesToResetIMU || !mCurrentFrame.mpImuPreintegratedFrame)
         {
             Verbose::PrintMess("TLM: PoseOptimization ", Verbose::VERBOSITY_DEBUG);
             Optimizer::PoseOptimization(&mCurrentFrame);

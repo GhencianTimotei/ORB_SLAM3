@@ -5332,9 +5332,10 @@ int Optimizer::PoseInertialOptimizationLastFrame(Frame *pFrame, bool bRecInit, b
     // preintegration through mImuBias/mVw; treat it as a tracking failure
     // instead of propagating it.
     if (!VP->estimate().Rwb.allFinite() || !VP->estimate().twb.allFinite() ||
-        !VV->estimate().allFinite() || !VG->estimate().allFinite() || !VA->estimate().allFinite())
+        !VV->estimate().allFinite() || !VG->estimate().allFinite() || !VA->estimate().allFinite() ||
+        std::abs(VP->estimate().Rwb.determinant() - 1.0) > 0.1)
     {
-        Verbose::PrintMess("PoseInertialOptimizationLastFrame: non-finite result, discarding. Frame " + to_string(pFrame->mnId), Verbose::VERBOSITY_NORMAL);
+        Verbose::PrintMess("PoseInertialOptimizationLastFrame: non-finite or non-rotation result, discarding. Frame " + to_string(pFrame->mnId), Verbose::VERBOSITY_NORMAL);
         return 0;
     }
 
